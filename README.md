@@ -44,6 +44,40 @@ yarn cli codex
 ```
 
 <h3 align="center">
+Use Local CLI as `happynow` (Keep Global `happy` Unchanged)
+</h3>
+
+```bash
+# 1) Build local CLI artifacts
+npm --prefix packages/happy-cli run build
+
+# 2) Link a separate command name to local source build
+GLOBAL_BIN="$(npm prefix -g)/bin"
+ln -sf "$PWD/packages/happy-cli/bin/happy.mjs" "$GLOBAL_BIN/happynow"
+
+# 3) Verify
+which happynow
+happynow --help
+```
+
+Usage examples:
+
+```bash
+# start Codex via local build
+happynow codex
+
+# resume latest local Codex session
+happynow codex --resume
+
+# resume a specific session id
+happynow codex --resume <session-id>
+```
+
+Notes:
+- This does not replace or modify your global `happy` command.
+- Re-run `npm --prefix packages/happy-cli run build` after local code changes.
+
+<h3 align="center">
 Release (Maintainers)
 </h3>
 

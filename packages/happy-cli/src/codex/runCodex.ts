@@ -6,18 +6,17 @@ import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
 import { randomUUID } from 'node:crypto';
+import { createId } from '@paralleldrive/cuid2';
 import { logger } from '@/ui/logger';
 import { Credentials, readSettings } from '@/persistence';
 import { initialMachineMetadata } from '@/daemon/run';
 import { configuration } from '@/configuration';
 import packageJson from '../../package.json';
-import os from 'node:os';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
-import { resolve, join } from 'node:path';
+import { join } from 'node:path';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
-import fs from 'node:fs';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
@@ -33,6 +32,18 @@ import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
+import {
+    buildCodexMetadataModelOptions,
+    extractCodexModelSignalsFromEvent,
+    resolveCodexModelCodes,
+} from './modelMetadata';
+import { createEnvelope } from '@slopus/happy-wire';
+import {
+    findCodexResumeFileBySessionId,
+    findCodexSessionIdForHappySessionId,
+    findLatestCodexResumeFile,
+    loadResumeHistoryEntries,
+} from './resume';
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -69,6 +80,9 @@ export async function runCodex(opts: {
     credentials: Credentials;
     startedBy?: 'daemon' | 'terminal';
     noSandbox?: boolean;
+    resume?: {
+        sessionId?: string;
+    };
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
@@ -165,6 +179,37 @@ export async function runCodex(opts: {
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
+    const observedModelCodes = new Set<string>();
+    let syncedModelCodesSignature = '';
+    let syncedCurrentModelCode: string | undefined = undefined;
+
+    const syncCodexModelMetadata = (nextCurrentModel?: string) => {
+        const modelCodes = resolveCodexModelCodes({
+            preferredModel: nextCurrentModel,
+            observedModels: observedModelCodes,
+            environment: process.env,
+        });
+        const currentModelCode = nextCurrentModel?.trim() || syncedCurrentModelCode;
+        const modelCodesSignature = modelCodes.join('\u001f');
+        if (
+            modelCodesSignature === syncedModelCodesSignature
+            && currentModelCode === syncedCurrentModelCode
+        ) {
+            return;
+        }
+
+        syncedModelCodesSignature = modelCodesSignature;
+        syncedCurrentModelCode = currentModelCode;
+
+        session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            models: buildCodexMetadataModelOptions(modelCodes),
+            ...(currentModelCode ? { currentModelCode } : {}),
+        }));
+    };
+
+    // Ensure Codex sessions expose model metadata from startup.
+    syncCodexModelMetadata();
 
     session.onUserMessage((message) => {
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
@@ -182,6 +227,10 @@ export async function runCodex(opts: {
         if (message.meta?.hasOwnProperty('model')) {
             messageModel = message.meta.model || undefined;
             currentModel = messageModel;
+            if (messageModel) {
+                observedModelCodes.add(messageModel);
+                syncCodexModelMetadata(messageModel);
+            }
             logger.debug(`[Codex] Model updated from user message: ${messageModel || 'reset to default'}`);
         } else {
             logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
@@ -363,47 +412,6 @@ export async function runCodex(opts: {
 
     const client = new CodexMcpClient(sandboxConfig);
 
-    // Helper: find Codex session transcript for a given sessionId
-    function findCodexResumeFile(sessionId: string | null): string | null {
-        if (!sessionId) return null;
-        try {
-            const codexHomeDir = process.env.CODEX_HOME || join(os.homedir(), '.codex');
-            const rootDir = join(codexHomeDir, 'sessions');
-
-            // Recursively collect all files under the sessions directory
-            function collectFilesRecursive(dir: string, acc: string[] = []): string[] {
-                let entries: fs.Dirent[];
-                try {
-                    entries = fs.readdirSync(dir, { withFileTypes: true });
-                } catch {
-                    return acc;
-                }
-                for (const entry of entries) {
-                    const full = join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        collectFilesRecursive(full, acc);
-                    } else if (entry.isFile()) {
-                        acc.push(full);
-                    }
-                }
-                return acc;
-            }
-
-            const candidates = collectFilesRecursive(rootDir)
-                .filter(full => full.endsWith(`-${sessionId}.jsonl`))
-                .filter(full => {
-                    try { return fs.statSync(full).isFile(); } catch { return false; }
-                })
-                .sort((a, b) => {
-                    const sa = fs.statSync(a).mtimeMs;
-                    const sb = fs.statSync(b).mtimeMs;
-                    return sb - sa; // newest first
-                });
-            return candidates[0] || null;
-        } catch {
-            return null;
-        }
-    }
     permissionHandler = new CodexPermissionHandler(session);
     const reasoningProcessor = new ReasoningProcessor((message) => {
         const envelopes = mapCodexProcessorMessageToSessionEnvelopes(message, { currentTurnId });
@@ -420,6 +428,16 @@ export async function runCodex(opts: {
     client.setPermissionHandler(permissionHandler);
     client.setHandler((msg) => {
         logger.debug(`[Codex] MCP message: ${JSON.stringify(msg)}`);
+        const modelSignals = extractCodexModelSignalsFromEvent(msg);
+        if (modelSignals.currentModel) {
+            observedModelCodes.add(modelSignals.currentModel);
+        }
+        if (modelSignals.models.length > 0 || modelSignals.currentModel) {
+            for (const modelCode of modelSignals.models) {
+                observedModelCodes.add(modelCode);
+            }
+            syncCodexModelMetadata(modelSignals.currentModel);
+        }
 
         // Add messages to the ink UI buffer based on message type
         if (msg.type === 'agent_message') {
@@ -533,6 +551,93 @@ export async function runCodex(opts: {
         }
     } as const;
     let first = true;
+    let requestedResumeFile: string | null = null;
+
+    if (opts.resume?.sessionId) {
+        let resolvedSessionId = opts.resume.sessionId;
+        requestedResumeFile = findCodexResumeFileBySessionId(resolvedSessionId);
+
+        // Fallback: user may provide Happy session id (cmm...), map it to Codex session id from Happy logs.
+        if (!requestedResumeFile) {
+            const mappedSessionId = findCodexSessionIdForHappySessionId(opts.resume.sessionId);
+            if (mappedSessionId) {
+                resolvedSessionId = mappedSessionId;
+                requestedResumeFile = findCodexResumeFileBySessionId(mappedSessionId);
+                if (requestedResumeFile) {
+                    messageBuffer.addMessage(
+                        `Resolved Happy session ${trimIdent(opts.resume.sessionId)} to Codex session ${trimIdent(mappedSessionId)} (most complete local transcript).`,
+                        'status',
+                    );
+                    logger.debug('[Codex] Resolved Happy session id to Codex session id', {
+                        happySessionId: opts.resume.sessionId,
+                        codexSessionId: mappedSessionId,
+                    });
+                }
+            }
+        }
+
+        if (!requestedResumeFile) {
+            throw new Error(
+                `Could not find Codex session transcript for ${opts.resume.sessionId}. ` +
+                `If this is a Happy session id, check that local Happy logs are present.`,
+            );
+        }
+        messageBuffer.addMessage(`Resuming Codex session ${trimIdent(resolvedSessionId)}...`, 'status');
+        logger.debug('[Codex] Using explicit resume session:', requestedResumeFile);
+    } else if (opts.resume) {
+        requestedResumeFile = findLatestCodexResumeFile();
+        if (requestedResumeFile) {
+            messageBuffer.addMessage('Resuming latest Codex session...', 'status');
+            logger.debug('[Codex] Using latest resume session:', requestedResumeFile);
+        } else {
+            messageBuffer.addMessage('No previous Codex session found. Starting a new session.', 'status');
+            logger.debug('[Codex] Resume requested, but no local Codex session transcripts were found');
+        }
+    }
+
+    // Backfill transcript history into Happy session stream so mobile/web session history
+    // is visible after resume (Codex resume restores model context but does not replay UI history).
+    if (requestedResumeFile) {
+        try {
+            const historyEntries = loadResumeHistoryEntries(requestedResumeFile);
+            if (historyEntries.length > 0) {
+                const turnId = createId();
+                session.sendSessionProtocolMessage(createEnvelope('agent', { t: 'turn-start' }, { turn: turnId }));
+                session.sendSessionProtocolMessage(createEnvelope(
+                    'agent',
+                    { t: 'service', text: `Restored ${historyEntries.length} messages from resumed Codex transcript.` },
+                    { turn: turnId },
+                ));
+
+                for (const entry of historyEntries) {
+                    session.sendSessionProtocolMessage(createEnvelope(
+                        entry.role === 'assistant' ? 'agent' : 'user',
+                        { t: 'text', text: entry.text },
+                        { turn: turnId },
+                    ));
+                }
+
+                session.sendSessionProtocolMessage(createEnvelope(
+                    'agent',
+                    { t: 'turn-end', status: 'completed' },
+                    { turn: turnId },
+                ));
+                messageBuffer.addMessage(
+                    `Hydrated Happy session history with ${historyEntries.length} messages from resumed transcript.`,
+                    'status',
+                );
+                logger.debug('[Codex] Hydrated session history from resume transcript', {
+                    resumeFile: requestedResumeFile,
+                    messageCount: historyEntries.length,
+                });
+            }
+        } catch (error) {
+            logger.debug('[Codex] Failed to hydrate history from resume transcript', {
+                resumeFile: requestedResumeFile,
+                error,
+            });
+        }
+    }
 
     try {
         logger.debug('[codex]: client.connect begin');
@@ -578,7 +683,7 @@ export async function runCodex(opts: {
                 // Capture previous sessionId and try to find its transcript to resume
                 try {
                     const prevSessionId = client.getSessionId();
-                    nextExperimentalResume = findCodexResumeFile(prevSessionId);
+                    nextExperimentalResume = prevSessionId ? findCodexResumeFileBySessionId(prevSessionId) : null;
                     if (nextExperimentalResume) {
                         logger.debug(`[Codex] Found resume file for session ${prevSessionId}: ${nextExperimentalResume}`);
                         messageBuffer.addMessage('Resuming previous context…', 'status');
@@ -615,7 +720,7 @@ export async function runCodex(opts: {
 
                 if (!wasCreated) {
                     const startConfig: CodexSessionConfig = {
-                        prompt: first ? message.message + '\n\n' + CHANGE_TITLE_INSTRUCTION : message.message,
+                        prompt: message.message,
                         sandbox: executionPolicy.sandbox,
                         'approval-policy': executionPolicy.approvalPolicy,
                         config: { mcp_servers: mcpServers }
@@ -635,7 +740,7 @@ export async function runCodex(opts: {
                     }
                     // Priority 2: Resume from stored abort session
                     else if (storedSessionIdForResume) {
-                        const abortResumeFile = findCodexResumeFile(storedSessionIdForResume);
+                        const abortResumeFile = findCodexResumeFileBySessionId(storedSessionIdForResume);
                         if (abortResumeFile) {
                             resumeFile = abortResumeFile;
                             logger.debug('[Codex] Using resume file from aborted session:', resumeFile);
@@ -643,16 +748,38 @@ export async function runCodex(opts: {
                         }
                         storedSessionIdForResume = null; // consume once
                     }
+                    // Priority 3: Explicit resume request from CLI args.
+                    else if (requestedResumeFile) {
+                        resumeFile = requestedResumeFile;
+                        requestedResumeFile = null; // consume once
+                        logger.debug('[Codex] Using resume file from CLI args:', resumeFile);
+                    }
                     
                     // Apply resume file if found
                     if (resumeFile) {
                         (startConfig.config as any).experimental_resume = resumeFile;
                     }
+
+                    // Avoid appending title-change instruction on resumed starts to reduce
+                    // unnecessary context overhead right after transcript restoration.
+                    if (first && !resumeFile) {
+                        startConfig.prompt = `${message.message}\n\n${CHANGE_TITLE_INSTRUCTION}`;
+                    }
                     
-                    await client.startSession(
+                    const response = await client.startSession(
                         startConfig,
                         { signal: abortController.signal }
                     );
+                    const modelSignals = extractCodexModelSignalsFromEvent(response);
+                    if (modelSignals.currentModel) {
+                        observedModelCodes.add(modelSignals.currentModel);
+                    }
+                    for (const modelCode of modelSignals.models) {
+                        observedModelCodes.add(modelCode);
+                    }
+                    if (modelSignals.models.length > 0 || modelSignals.currentModel) {
+                        syncCodexModelMetadata(modelSignals.currentModel);
+                    }
                     wasCreated = true;
                     first = false;
                 } else {
@@ -661,6 +788,16 @@ export async function runCodex(opts: {
                         { signal: abortController.signal }
                     );
                     logger.debug('[Codex] continueSession response:', response);
+                    const modelSignals = extractCodexModelSignalsFromEvent(response);
+                    if (modelSignals.currentModel) {
+                        observedModelCodes.add(modelSignals.currentModel);
+                    }
+                    for (const modelCode of modelSignals.models) {
+                        observedModelCodes.add(modelCode);
+                    }
+                    if (modelSignals.models.length > 0 || modelSignals.currentModel) {
+                        syncCodexModelMetadata(modelSignals.currentModel);
+                    }
                 }
             } catch (error) {
                 logger.warn('Error in codex session:', error);

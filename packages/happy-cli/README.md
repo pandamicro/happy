@@ -22,6 +22,35 @@ yarn cli --help
 yarn cli --help
 ```
 
+## Use Local CLI as `happynow` (Keep Global `happy` Unchanged)
+
+From repository root:
+
+```bash
+# 1) Build local CLI artifacts
+npm --prefix packages/happy-cli run build
+
+# 2) Link a separate command name to local source build
+GLOBAL_BIN="$(npm prefix -g)/bin"
+ln -sf "$PWD/packages/happy-cli/bin/happy.mjs" "$GLOBAL_BIN/happynow"
+
+# 3) Verify
+which happynow
+happynow --help
+```
+
+Usage examples:
+
+```bash
+happynow codex
+happynow codex --resume
+happynow codex --resume <session-id>
+```
+
+Notes:
+- This does not replace or modify your global `happy` command.
+- Re-run `npm --prefix packages/happy-cli run build` after local code changes.
+
 ## Usage
 
 ### Claude (default)
@@ -87,6 +116,14 @@ happy gemini project get          # Show current Google Cloud Project ID
 ```
 
 **Available models:** `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`
+
+### Codex Resume
+
+```bash
+happy codex --resume              # Resume latest local Codex session
+happy codex --resume <session-id> # Resume specific Codex session
+happy codex resume <session-id>   # Equivalent subcommand style
+```
 
 ### Generic ACP Commands
 

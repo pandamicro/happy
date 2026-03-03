@@ -101,20 +101,22 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
     // Handle codex command
     try {
       const { runCodex } = await import('@/codex/runCodex');
+      const { parseCodexArgs } = await import('@/codex/codexArgs');
       
-      // Parse startedBy argument
-      let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       const codexArgs = extractNoSandboxFlag(args.slice(1));
-      for (let i = 0; i < codexArgs.args.length; i++) {
-        if (codexArgs.args[i] === '--started-by') {
-          startedBy = codexArgs.args[++i] as 'daemon' | 'terminal';
-        }
-      }
+      const parsedCodexArgs = parseCodexArgs(codexArgs.args);
       
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
-      await runCodex({credentials, startedBy, noSandbox: codexArgs.noSandbox});
+      await runCodex({
+        credentials,
+        startedBy: parsedCodexArgs.startedBy,
+        noSandbox: codexArgs.noSandbox,
+        resume: parsedCodexArgs.resumeRequested
+          ? { sessionId: parsedCodexArgs.resumeSessionId }
+          : undefined,
+      });
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -655,6 +657,7 @@ ${chalk.bold('Examples:')}
   happy acp gemini         Start Gemini via generic ACP runner
   happy acp -- opencode --acp
                            Start a custom ACP command
+  happy codex --resume      Resume latest local Codex session
   happy acp opencode --verbose
                            Print raw ACP backend/envelope events
   happy auth login --force Authenticate

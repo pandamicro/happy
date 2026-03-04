@@ -15,7 +15,7 @@ import { AgentState } from "@/api/types";
  * Permission response from the mobile app.
  */
 export interface PermissionResponse {
-    id: string;
+    id?: string | null;
     approved: boolean;
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 }
@@ -37,6 +37,13 @@ export interface PermissionResult {
     decision: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 }
 
+export interface PermissionResolutionContext {
+    requestId: string;
+    pending: PendingRequest;
+    response: PermissionResponse;
+    result: PermissionResult;
+}
+
 /**
  * Abstract base class for permission handlers.
  *
@@ -52,6 +59,13 @@ export abstract class BasePermissionHandler {
      * Returns the log prefix for this handler.
      */
     protected abstract getLogPrefix(): string;
+
+    /**
+     * Hook for subclasses to react to permission decisions.
+     */
+    protected onPermissionResolved(_context: PermissionResolutionContext): void {
+        // no-op by default
+    }
 
     constructor(session: ApiSessionClient) {
         this.session = session;
@@ -76,14 +90,30 @@ export abstract class BasePermissionHandler {
         this.session.rpcHandlerManager.registerHandler<PermissionResponse, void>(
             'permission',
             async (response) => {
-                const pending = this.pendingRequests.get(response.id);
+                let requestId = typeof response.id === 'string' ? response.id : '';
+                let pending = requestId ? this.pendingRequests.get(requestId) : undefined;
+
+                // Defensive fallback: when client payload misses/mangles request id, but only one
+                // request is pending, resolve that one to avoid a dead permission UI.
+                if (!pending && this.pendingRequests.size === 1) {
+                    const firstPending = this.pendingRequests.entries().next().value as [string, PendingRequest] | undefined;
+                    if (firstPending) {
+                        requestId = firstPending[0];
+                        pending = firstPending[1];
+                        logger.debug(`${this.getLogPrefix()} Permission response id missing/mismatched, using sole pending request`, {
+                            requestId,
+                            receivedId: response.id,
+                        });
+                    }
+                }
+
                 if (!pending) {
                     logger.debug(`${this.getLogPrefix()} Permission request not found or already resolved`);
                     return;
                 }
 
                 // Remove from pending
-                this.pendingRequests.delete(response.id);
+                this.pendingRequests.delete(requestId);
 
                 // Resolve the permission request
                 const result: PermissionResult = response.approved
@@ -91,20 +121,30 @@ export abstract class BasePermissionHandler {
                     : { decision: response.decision === 'denied' ? 'denied' : 'abort' };
 
                 pending.resolve(result);
+                try {
+                    this.onPermissionResolved({
+                        requestId,
+                        pending,
+                        response,
+                        result,
+                    });
+                } catch (error) {
+                    logger.debug(`${this.getLogPrefix()} onPermissionResolved hook failed`, error);
+                }
 
                 // Move request to completed in agent state
                 this.session.updateAgentState((currentState) => {
-                    const request = currentState.requests?.[response.id];
+                    const request = currentState.requests?.[requestId];
                     if (!request) return currentState;
 
-                    const { [response.id]: _, ...remainingRequests } = currentState.requests || {};
+                    const { [requestId]: _, ...remainingRequests } = currentState.requests || {};
 
                     let res = {
                         ...currentState,
                         requests: remainingRequests,
                         completedRequests: {
                             ...currentState.completedRequests,
-                            [response.id]: {
+                            [requestId]: {
                                 ...request,
                                 completedAt: Date.now(),
                                 status: response.approved ? 'approved' : 'denied',

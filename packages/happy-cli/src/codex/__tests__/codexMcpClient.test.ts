@@ -10,6 +10,10 @@ const {
     mockClientConnect,
     mockClientClose,
     mockStdioCtor,
+    mockSetRequestHandler,
+    mockSetNotificationHandler,
+    mockCallTool,
+    getNotificationHandler,
 } = vi.hoisted(() => ({
     mockExecSync: vi.fn(),
     mockInitializeSandbox: vi.fn(),
@@ -18,6 +22,21 @@ const {
     mockClientConnect: vi.fn(),
     mockClientClose: vi.fn(),
     mockStdioCtor: vi.fn(),
+    mockSetRequestHandler: vi.fn(),
+    mockSetNotificationHandler: vi.fn(),
+    mockCallTool: vi.fn(),
+    getNotificationHandler: (() => {
+        let handler: ((data: any) => void) | null = null;
+        return {
+            set: (next: (data: any) => void) => {
+                handler = next;
+            },
+            get: () => handler,
+            clear: () => {
+                handler = null;
+            },
+        };
+    })(),
 }));
 
 vi.mock('child_process', () => ({
@@ -39,11 +58,13 @@ vi.mock('@/ui/logger', () => ({
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     Client: class MockClient {
-        setNotificationHandler = vi.fn();
-        setRequestHandler = vi.fn();
+        setNotificationHandler = mockSetNotificationHandler.mockImplementation((_schema: unknown, handler: (data: any) => void) => {
+            getNotificationHandler.set(handler);
+        });
+        setRequestHandler = mockSetRequestHandler;
         connect = mockClientConnect;
         close = mockClientClose;
-        callTool = vi.fn();
+        callTool = mockCallTool;
         constructor() {}
     },
 }));
@@ -83,6 +104,8 @@ describe('CodexMcpClient sandbox integration', () => {
         mockClientClose.mockResolvedValue(undefined);
         mockInitializeSandbox.mockResolvedValue(mockSandboxCleanup);
         mockWrapForMcpTransport.mockResolvedValue({ command: 'sh', args: ['-c', 'wrapped codex mcp'] });
+        mockCallTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+        getNotificationHandler.clear();
     });
 
     afterAll(() => {
@@ -151,5 +174,140 @@ describe('CodexMcpClient sandbox integration', () => {
                 }),
             }),
         );
+    });
+
+    it('normalizes permission decisions and returns elicitation-compliant payload', async () => {
+        const client = new CodexMcpClient(sandboxConfig);
+        const handleToolCall = vi.fn()
+            .mockResolvedValueOnce({ decision: 'approved_for_session' })
+            .mockResolvedValueOnce({ decision: 'denied' });
+        client.setPermissionHandler({ handleToolCall } as any);
+
+        await client.connect();
+
+        const approvalHandler = mockSetRequestHandler.mock.calls[0]?.[1];
+        expect(typeof approvalHandler).toBe('function');
+
+        const request = {
+            params: {
+                message: 'Allow Codex to apply proposed code changes?',
+                requestedSchema: {
+                    type: 'object',
+                    properties: {
+                        decision: {
+                            type: 'string',
+                            enum: ['approved', 'abort'],
+                        },
+                    },
+                },
+            },
+        };
+
+        await expect(approvalHandler(request)).resolves.toMatchObject({
+            action: 'accept',
+            content: { decision: 'approved' },
+            decision: 'approved',
+        });
+        await expect(approvalHandler(request)).resolves.toMatchObject({
+            action: 'decline',
+            content: { decision: 'abort' },
+            decision: 'abort',
+        });
+    });
+
+    it('maps decision into non-standard schema field when decision key is absent', async () => {
+        const client = new CodexMcpClient(sandboxConfig);
+        const handleToolCall = vi.fn().mockResolvedValue({ decision: 'approved_for_session' });
+        client.setPermissionHandler({ handleToolCall } as any);
+
+        await client.connect();
+
+        const approvalHandler = mockSetRequestHandler.mock.calls[0]?.[1];
+        expect(typeof approvalHandler).toBe('function');
+
+        const request = {
+            params: {
+                message: 'Allow tool?',
+                requestedSchema: {
+                    type: 'object',
+                    properties: {
+                        action: {
+                            type: 'string',
+                            enum: ['accept', 'decline'],
+                        },
+                    },
+                },
+            },
+        };
+
+        await expect(approvalHandler(request)).resolves.toMatchObject({
+            action: 'accept',
+            content: { action: 'accept' },
+            decision: 'accept',
+        });
+    });
+
+    it('preserves codex-specific elicitation fields and uses call_id directly', async () => {
+        const client = new CodexMcpClient(sandboxConfig);
+        const handleToolCall = vi.fn().mockResolvedValue({ decision: 'approved_for_session' });
+        client.setPermissionHandler({ handleToolCall } as any);
+
+        await client.connect();
+
+        const approvalHandler = mockSetRequestHandler.mock.calls[0]?.[1];
+        expect(typeof approvalHandler).toBe('function');
+
+        const request = {
+            params: {
+                message: 'Allow Codex to apply proposed code changes?',
+                call_id: 'call_abc123',
+                available_decisions: ['approved', 'abort'],
+                requestedSchema: {
+                    type: 'object',
+                    properties: {
+                        decision: {
+                            type: 'string',
+                        },
+                    },
+                },
+            },
+        };
+
+        await expect(approvalHandler(request)).resolves.toMatchObject({
+            action: 'accept',
+            content: { decision: 'approved' },
+            decision: 'approved',
+        });
+        expect(handleToolCall).toHaveBeenCalledWith(
+            'call_abc123',
+            'CodexPatch',
+            expect.objectContaining({
+                message: 'Allow Codex to apply proposed code changes?',
+            }),
+        );
+    });
+
+    it('returns fallback from continueSession when terminal event arrives but tool call hangs', async () => {
+        const client = new CodexMcpClient(sandboxConfig);
+        await client.connect();
+
+        (client as any).sessionId = 'session-1';
+        (client as any).conversationId = 'conversation-1';
+
+        const never = new Promise(() => {});
+        mockCallTool.mockReturnValueOnce(never as any);
+
+        const pending = client.continueSession('next prompt');
+        await Promise.resolve();
+
+        const notificationHandler = getNotificationHandler.get();
+        expect(notificationHandler).toBeTruthy();
+        notificationHandler!({
+            params: {
+                msg: { type: 'turn_aborted', turn_id: 'turn-1', reason: 'interrupted' },
+            },
+        });
+
+        await expect(pending).resolves.toEqual({ content: [] });
     });
 });

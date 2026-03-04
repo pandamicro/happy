@@ -7,13 +7,158 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { logger } from '@/ui/logger';
 import type { CodexSessionConfig, CodexToolResponse } from './types';
 import { z } from 'zod';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { execSync } from 'child_process';
 import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
+import { delay } from '@/utils/time';
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
+const CodexElicitRequestSchema = z.object({
+    method: z.literal('elicitation/create'),
+    params: z.record(z.string(), z.unknown()),
+}).passthrough();
+
+function extractEnumStringsFromSchema(schema: unknown): string[] {
+    if (!schema || typeof schema !== 'object') {
+        return [];
+    }
+
+    const queue: unknown[] = [schema];
+    const allowed = new Set<string>();
+
+    while (queue.length > 0) {
+        const node = queue.shift();
+        if (!node || typeof node !== 'object') {
+            continue;
+        }
+
+        const typed = node as Record<string, unknown>;
+        if (Array.isArray(typed.enum)) {
+            for (const item of typed.enum) {
+                if (typeof item === 'string') {
+                    allowed.add(item);
+                }
+            }
+        }
+        if (typeof typed.const === 'string') {
+            allowed.add(typed.const);
+        }
+
+        for (const value of Object.values(typed)) {
+            if (value && typeof value === 'object') {
+                queue.push(value);
+            }
+        }
+    }
+
+    return [...allowed];
+}
+
+function normalizeCodexDecision(
+    decision: 'approved' | 'approved_for_session' | 'denied' | 'abort',
+    allowedDecisions: string[] = [],
+): string {
+    const allowedSet = new Set(allowedDecisions);
+
+    // Codex approval endpoints generally expect approved/abort style decisions.
+    // Keep existing behavior equivalent while avoiding unsupported variants.
+    let normalized: string = decision;
+    if (normalized === 'approved_for_session') {
+        normalized = 'approved';
+    } else if (normalized === 'denied') {
+        normalized = 'abort';
+    }
+
+    if (allowedSet.size > 0 && !allowedSet.has(normalized)) {
+        if (normalized === 'approved' && allowedSet.has('accept')) {
+            normalized = 'accept';
+        } else if (allowedSet.has('approved')) {
+            normalized = 'approved';
+        } else if (allowedSet.has('abort')) {
+            normalized = 'abort';
+        } else {
+            normalized = allowedDecisions[0] || 'abort';
+        }
+    }
+
+    return normalized;
+}
+
+function extractStringDecisionsFromAvailableDecisions(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const decisions = new Set<string>();
+    for (const item of value) {
+        if (typeof item === 'string') {
+            decisions.add(item);
+        }
+    }
+
+    return [...decisions];
+}
+
+function buildElicitationApprovalResponse(
+    decision: string,
+    decisionField: string,
+): Record<string, unknown> {
+    const content: Record<string, unknown> = {
+        [decisionField]: decision,
+    };
+
+    // Compatibility:
+    // - Standard MCP elicitation consumers read `action` + `content`.
+    // - Some Codex builds still read top-level `decision` (and sometimes the decision field itself).
+    return {
+        action: decision === 'abort' ? 'decline' : 'accept',
+        content,
+        decision,
+        [decisionField]: decision,
+    };
+}
+
+function getRequestedSchemaProperties(schema: unknown): Record<string, unknown> {
+    if (!schema || typeof schema !== 'object') {
+        return {};
+    }
+
+    const properties = (schema as Record<string, unknown>).properties;
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+        return {};
+    }
+
+    return properties as Record<string, unknown>;
+}
+
+function resolveDecisionFieldAndEnum(schema: unknown): { field: string; allowedDecisions: string[] } {
+    const properties = getRequestedSchemaProperties(schema);
+    const propertyEntries = Object.entries(properties);
+
+    if (propertyEntries.length === 0) {
+        return { field: 'decision', allowedDecisions: [] };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(properties, 'decision')) {
+        const allowedDecisions = extractEnumStringsFromSchema(properties.decision);
+        return { field: 'decision', allowedDecisions };
+    }
+
+    const preferredValues = new Set(['approved', 'abort', 'accept', 'decline', 'cancel', 'deny', 'denied']);
+    for (const [field, schemaNode] of propertyEntries) {
+        const enums = extractEnumStringsFromSchema(schemaNode);
+        if (enums.some(value => preferredValues.has(value))) {
+            return { field, allowedDecisions: enums };
+        }
+    }
+
+    const [firstField, firstSchema] = propertyEntries[0];
+    return {
+        field: firstField,
+        allowedDecisions: extractEnumStringsFromSchema(firstSchema),
+    };
+}
 
 /**
  * Get the correct MCP subcommand based on installed codex version
@@ -60,6 +205,8 @@ export class CodexMcpClient {
     private sandboxConfig?: SandboxConfig;
     private sandboxCleanup: (() => Promise<void>) | null = null;
     public sandboxEnabled: boolean = false;
+    private terminalEventCounter = 0;
+    private terminalEventListeners = new Set<(event: { counter: number; message: any }) => void>();
 
     constructor(sandboxConfig?: SandboxConfig) {
         this.sandboxConfig = sandboxConfig;
@@ -76,8 +223,126 @@ export class CodexMcpClient {
         }).passthrough(), (data) => {
             const msg = data.params.msg;
             this.updateIdentifiersFromEvent(msg);
+            this.notifyTerminalEventIfNeeded(msg);
             this.handler?.(msg);
         });
+    }
+
+    private notifyTerminalEventIfNeeded(message: any): void {
+        if (!message || typeof message !== 'object') {
+            return;
+        }
+
+        if (message.type !== 'task_complete' && message.type !== 'turn_aborted') {
+            return;
+        }
+
+        this.terminalEventCounter += 1;
+        const event = {
+            counter: this.terminalEventCounter,
+            message,
+        };
+
+        for (const listener of this.terminalEventListeners) {
+            try {
+                listener(event);
+            } catch (error) {
+                logger.debug('[CodexMCP] Terminal event listener failed', error);
+            }
+        }
+    }
+
+    private waitForNextTerminalEvent(afterCounter: number): {
+        promise: Promise<{ counter: number; message: any }>;
+        dispose: () => void;
+    } {
+        let disposed = false;
+        let resolveFn: ((event: { counter: number; message: any }) => void) | null = null;
+
+        const promise = new Promise<{ counter: number; message: any }>((resolve) => {
+            resolveFn = resolve;
+        });
+
+        const listener = (event: { counter: number; message: any }) => {
+            if (disposed) {
+                return;
+            }
+            if (event.counter <= afterCounter) {
+                return;
+            }
+            disposed = true;
+            this.terminalEventListeners.delete(listener);
+            resolveFn?.(event);
+        };
+
+        this.terminalEventListeners.add(listener);
+
+        return {
+            promise,
+            dispose: () => {
+                if (disposed) {
+                    return;
+                }
+                disposed = true;
+                this.terminalEventListeners.delete(listener);
+            },
+        };
+    }
+
+    /**
+     * Codex can emit terminal events (e.g. turn_aborted) without resolving the MCP tool call.
+     * Use terminal events as a fallback so the run loop does not remain blocked forever.
+     */
+    private async callToolWithTerminalFallback(
+        request: { name: string; arguments: any },
+        options?: { signal?: AbortSignal },
+        operationLabel: 'startSession' | 'continueSession' = 'continueSession',
+    ): Promise<any> {
+        const baselineCounter = this.terminalEventCounter;
+        const terminalWait = this.waitForNextTerminalEvent(baselineCounter);
+        const toolPromise = this.client.callTool(request, undefined, {
+            signal: options?.signal,
+            timeout: DEFAULT_TIMEOUT,
+        });
+
+        try {
+            const raced = await Promise.race([
+                toolPromise.then((response) => ({ kind: 'tool' as const, response })),
+                terminalWait.promise.then((event) => ({ kind: 'terminal' as const, event })),
+            ]);
+
+            if (raced.kind === 'tool') {
+                return raced.response;
+            }
+
+            logger.debug(`[CodexMCP] ${operationLabel} observed terminal event before tool response`, {
+                eventType: raced.event.message?.type,
+                turnId: raced.event.message?.turn_id,
+            });
+
+            const graceResult = await Promise.race([
+                toolPromise.then((response) => ({ settled: true as const, response })),
+                delay(1200).then(() => ({ settled: false as const })),
+            ]);
+
+            if (graceResult.settled) {
+                return graceResult.response;
+            }
+
+            // Keep observing late completion to avoid unhandled rejections.
+            toolPromise
+                .then((response) => {
+                    logger.debug(`[CodexMCP] ${operationLabel} late tool response arrived`, response);
+                })
+                .catch((error) => {
+                    logger.debug(`[CodexMCP] ${operationLabel} late tool response failed`, error);
+                });
+
+            logger.debug(`[CodexMCP] ${operationLabel} returning synthetic fallback response after terminal event`);
+            return { content: [] };
+        } finally {
+            terminalWait.dispose();
+        }
     }
 
     setHandler(handler: ((event: any) => void) | null): void {
@@ -188,51 +453,95 @@ export class CodexMcpClient {
     private registerPermissionHandlers(): void {
         // Register handler for exec command approval requests
         this.client.setRequestHandler(
-            ElicitRequestSchema,
+            CodexElicitRequestSchema,
             async (request) => {
-                console.log('[CodexMCP] Received elicitation request:', request.params);
+                const params = request.params && typeof request.params === 'object'
+                    ? (request.params as Record<string, unknown>)
+                    : {};
+                const pickString = (...values: unknown[]): string | undefined => {
+                    for (const value of values) {
+                        if (typeof value === 'string' && value.trim().length > 0) {
+                            return value;
+                        }
+                    }
+                    return undefined;
+                };
 
-                // Load params
-                const params = request.params as unknown as {
-                    message: string,
-                    codex_elicitation: string,
-                    codex_mcp_tool_call_id: string,
-                    codex_event_id: string,
-                    codex_call_id: string,
-                    codex_command: string[],
-                    codex_cwd: string
+                const commandInput = params.codex_command ?? params.command;
+                const normalizedCommand = Array.isArray(commandInput)
+                    ? commandInput.filter((item): item is string => typeof item === 'string')
+                    : (typeof commandInput === 'string' ? commandInput : undefined);
+                const toolCallId = pickString(
+                    params.codex_call_id,
+                    params.call_id,
+                    params.codex_mcp_tool_call_id,
+                    params.codex_event_id,
+                );
+                const elicitationType = pickString(params.codex_elicitation, params.type, params.message) || '';
+                const lowerElicitationType = elicitationType.toLowerCase();
+                const isPatchApproval = lowerElicitationType.includes('patch') || lowerElicitationType.includes('code changes');
+                const toolName = isPatchApproval ? 'CodexPatch' : 'CodexBash';
+                const schemaResolution = resolveDecisionFieldAndEnum(params.requestedSchema);
+                const availableDecisions = extractStringDecisionsFromAvailableDecisions(params.available_decisions);
+                const mergedAllowedDecisions = schemaResolution.allowedDecisions.length > 0
+                    ? schemaResolution.allowedDecisions
+                    : availableDecisions;
+                const decisionField = schemaResolution.field;
+                const input: Record<string, unknown> = {};
+                if (normalizedCommand !== undefined) {
+                    input.command = normalizedCommand;
                 }
-                const toolName = 'CodexBash';
+                const cwd = pickString(params.codex_cwd, params.cwd);
+                if (cwd) {
+                    input.cwd = cwd;
+                }
+                const message = pickString(params.message, params.reason);
+                if (message) {
+                    input.message = message;
+                }
+                if (params.changes && typeof params.changes === 'object') {
+                    input.changes = params.changes;
+                }
+                if (Object.keys(input).length === 0) {
+                    Object.assign(input, params);
+                }
+
+                logger.debug('[CodexMCP] Received approval request', {
+                    elicitationType,
+                    toolCallId,
+                    toolName,
+                    keys: Object.keys(params),
+                    hasCommand: normalizedCommand !== undefined,
+                    availableDecisions,
+                    decisionField,
+                });
 
                 // If no permission handler set, deny by default
                 if (!this.permissionHandler) {
                     logger.debug('[CodexMCP] No permission handler set, denying by default');
-                    return {
-                        decision: 'denied' as const,
-                    };
+                    const decision = normalizeCodexDecision('abort', mergedAllowedDecisions);
+                    return buildElicitationApprovalResponse(decision, decisionField);
                 }
 
                 try {
                     // Request permission through the handler
                     const result = await this.permissionHandler.handleToolCall(
-                        params.codex_call_id,
+                        toolCallId,
                         toolName,
-                        {
-                            command: params.codex_command,
-                            cwd: params.codex_cwd
-                        }
+                        input
                     );
+                    const decision = normalizeCodexDecision(result.decision, mergedAllowedDecisions);
 
-                    logger.debug('[CodexMCP] Permission result:', result);
-                    return {
-                        decision: result.decision
-                    }
+                    logger.debug('[CodexMCP] Permission result:', {
+                        rawDecision: result.decision,
+                        normalizedDecision: decision,
+                        decisionField,
+                    });
+                    return buildElicitationApprovalResponse(decision, decisionField);
                 } catch (error) {
                     logger.debug('[CodexMCP] Error handling permission request:', error);
-                    return {
-                        decision: 'denied' as const,
-                        reason: error instanceof Error ? error.message : 'Permission request failed'
-                    };
+                    const decision = normalizeCodexDecision('abort', mergedAllowedDecisions);
+                    return buildElicitationApprovalResponse(decision, decisionField);
                 }
             }
         );
@@ -245,14 +554,14 @@ export class CodexMcpClient {
 
         logger.debug('[CodexMCP] Starting Codex session:', config);
 
-        const response = await this.client.callTool({
-            name: 'codex',
-            arguments: config as any
-        }, undefined, {
-            signal: options?.signal,
-            timeout: DEFAULT_TIMEOUT,
-            // maxTotalTimeout: 10000000000 
-        });
+        const response = await this.callToolWithTerminalFallback(
+            {
+                name: 'codex',
+                arguments: config as any,
+            },
+            options,
+            'startSession',
+        );
 
         logger.debug('[CodexMCP] startSession response:', response);
 
@@ -278,13 +587,14 @@ export class CodexMcpClient {
         const args = { sessionId: this.sessionId, conversationId: this.conversationId, prompt };
         logger.debug('[CodexMCP] Continuing Codex session:', args);
 
-        const response = await this.client.callTool({
-            name: 'codex-reply',
-            arguments: args
-        }, undefined, {
-            signal: options?.signal,
-            timeout: DEFAULT_TIMEOUT
-        });
+        const response = await this.callToolWithTerminalFallback(
+            {
+                name: 'codex-reply',
+                arguments: args,
+            },
+            options,
+            'continueSession',
+        );
 
         logger.debug('[CodexMCP] continueSession response:', response);
         this.extractIdentifiers(response);

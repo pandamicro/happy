@@ -1,7 +1,7 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, ClientToServerEvents, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
+import { AgentState, ClientToServerEvents, MessageMetaSchema, Metadata, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff, delay } from '@/utils/time';
 import { configuration } from '@/configuration';
@@ -233,6 +233,61 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    private isRecord(value: unknown): value is Record<string, unknown> {
+        return !!value && typeof value === 'object';
+    }
+
+    /**
+     * Accept both legacy user messages and modern session-envelope user text
+     * so all agents can continue to consume a single UserMessage shape.
+     */
+    private normalizeIncomingUserMessage(message: unknown): UserMessage | null {
+        const userResult = UserMessageSchema.safeParse(message);
+        if (userResult.success) {
+            return userResult.data;
+        }
+
+        if (!this.isRecord(message) || message.role !== 'session' || !this.isRecord(message.content)) {
+            return null;
+        }
+
+        // Compatibility: some consumers may still wrap envelope under content.data.
+        const content = message.content.type === 'session'
+            && this.isRecord(message.content.data)
+            ? message.content.data
+            : message.content;
+
+        if (!this.isRecord(content) || content.role !== 'user' || !this.isRecord(content.ev)) {
+            return null;
+        }
+        if (content.ev.t !== 'text' || typeof content.ev.text !== 'string') {
+            return null;
+        }
+
+        const converted: {
+            role: 'user',
+            content: {
+                type: 'text',
+                text: string,
+            },
+            meta?: Record<string, unknown>,
+        } = {
+            role: 'user',
+            content: {
+                type: 'text',
+                text: content.ev.text,
+            },
+        };
+
+        const metaResult = MessageMetaSchema.safeParse(message.meta);
+        if (metaResult.success) {
+            converted.meta = metaResult.data;
+        }
+
+        const convertedResult = UserMessageSchema.safeParse(converted);
+        return convertedResult.success ? convertedResult.data : null;
+    }
+
     private authHeaders() {
         return {
             'Authorization': `Bearer ${this.token}`,
@@ -241,12 +296,12 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     private routeIncomingMessage(message: unknown) {
-        const userResult = UserMessageSchema.safeParse(message);
-        if (userResult.success) {
+        const userMessage = this.normalizeIncomingUserMessage(message);
+        if (userMessage) {
             if (this.pendingMessageCallback) {
-                this.pendingMessageCallback(userResult.data);
+                this.pendingMessageCallback(userMessage);
             } else {
-                this.pendingMessages.push(userResult.data);
+                this.pendingMessages.push(userMessage);
             }
             return;
         }

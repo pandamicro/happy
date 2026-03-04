@@ -578,6 +578,109 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect((client as any).lastSeq).toBe(1);
     });
 
+    it('fetchMessages routes modern session-envelope user text to user callback', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        const sessionEnvelopeMessage = {
+            role: 'session',
+            content: {
+                id: 'env-user-1',
+                time: 1001,
+                role: 'user',
+                ev: { t: 'text', text: 'from modern envelope' }
+            },
+            meta: {
+                permissionMode: 'read-only',
+                model: 'gpt-5'
+            }
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-1',
+                        seq: 1,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, sessionEnvelopeMessage)
+                        },
+                        localId: null,
+                        createdAt: 1000,
+                        updatedAt: 1000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith({
+            role: 'user',
+            content: {
+                type: 'text',
+                text: 'from modern envelope'
+            },
+            meta: {
+                permissionMode: 'read-only',
+                model: 'gpt-5'
+            }
+        });
+    });
+
+    it('fetchMessages routes wrapped session-envelope user text to user callback', async () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        const wrappedSessionEnvelopeMessage = {
+            role: 'session',
+            content: {
+                type: 'session',
+                data: {
+                    id: 'env-user-2',
+                    time: 1002,
+                    role: 'user',
+                    ev: { t: 'text', text: 'from wrapped envelope' }
+                }
+            }
+        };
+
+        mockAxiosGet.mockResolvedValueOnce({
+            data: {
+                messages: [
+                    {
+                        id: 'msg-1',
+                        seq: 1,
+                        content: {
+                            t: 'encrypted',
+                            c: encryptContent(session, wrappedSessionEnvelopeMessage)
+                        },
+                        localId: null,
+                        createdAt: 1000,
+                        updatedAt: 1000
+                    }
+                ],
+                hasMore: false
+            }
+        });
+
+        await (client as any).fetchMessages();
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith({
+            role: 'user',
+            content: {
+                type: 'text',
+                text: 'from wrapped envelope'
+            }
+        });
+    });
+
     it('fetchMessages uses incremental cursor and paginates while hasMore is true', async () => {
         const client = new ApiSessionClient('fake-token', session);
         const onUserMessage = vi.fn();
@@ -722,6 +825,34 @@ describe('ApiSessionClient v3 messages API migration', () => {
         expect(onUserMessage).toHaveBeenCalledTimes(1);
         expect(onUserMessage).toHaveBeenCalledWith(userMessage);
         expect((client as any).lastSeq).toBe(2);
+        expect(mockAxiosGet).not.toHaveBeenCalled();
+    });
+
+    it('applies modern session-envelope user text updates directly (fast path)', () => {
+        const client = new ApiSessionClient('fake-token', session);
+        const onUserMessage = vi.fn();
+        client.onUserMessage(onUserMessage);
+
+        (client as any).lastSeq = 10;
+        emitSocketEvent('update', createNewMessageUpdate(11, encryptContent(session, {
+            role: 'session',
+            content: {
+                id: 'env-user-fast',
+                time: 2001,
+                role: 'user',
+                ev: { t: 'text', text: 'fast-path modern user' }
+            }
+        })));
+
+        expect(onUserMessage).toHaveBeenCalledTimes(1);
+        expect(onUserMessage).toHaveBeenCalledWith({
+            role: 'user',
+            content: {
+                type: 'text',
+                text: 'fast-path modern user'
+            }
+        });
+        expect((client as any).lastSeq).toBe(11);
         expect(mockAxiosGet).not.toHaveBeenCalled();
     });
 

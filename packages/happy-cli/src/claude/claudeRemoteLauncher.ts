@@ -15,6 +15,8 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
+import { createEnvelope } from "@slopus/happy-wire";
+import { randomUUID } from "node:crypto";
 
 interface PermissionsField {
     date: number;
@@ -375,6 +377,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onMessage,
                     onCompletionEvent: (message: string) => {
                         logger.debug(`[remote]: Completion event: ${message}`);
+                        if (message === 'Compaction started' || message === 'Compaction completed') {
+                            const text = message === 'Compaction started'
+                                ? 'Compacting session history via /compact...'
+                                : 'Session compaction completed.';
+                            session.client.sendSessionProtocolMessage(createEnvelope(
+                                'agent',
+                                { t: 'service', text },
+                                { turn: randomUUID() },
+                            ));
+                        }
                         session.client.sendSessionEvent({ type: 'message', message });
                     },
                     onSessionReset: () => {

@@ -23,6 +23,11 @@ export type { PermissionResult, PendingRequest };
  */
 export class CodexPermissionHandler extends BasePermissionHandler {
     private approveForSessionTools = new Set<string>();
+    private static readonly ALWAYS_AUTO_APPROVE_TOOLS = new Set<string>([
+        'change_title',
+        'happy__change_title',
+        'mcp__happy__change_title',
+    ]);
 
     constructor(session: ApiSessionClient) {
         super(session);
@@ -62,6 +67,25 @@ export class CodexPermissionHandler extends BasePermissionHandler {
                 receivedToolCallId: toolCallId,
                 normalizedToolCallId,
             });
+        }
+
+        if (CodexPermissionHandler.ALWAYS_AUTO_APPROVE_TOOLS.has(toolName)) {
+            logger.debug(`${this.getLogPrefix()} Auto-approving safe tool ${toolName} (${normalizedToolCallId})`);
+            this.session.updateAgentState((currentState) => ({
+                ...currentState,
+                completedRequests: {
+                    ...currentState.completedRequests,
+                    [normalizedToolCallId]: {
+                        tool: toolName,
+                        arguments: input,
+                        createdAt: Date.now(),
+                        completedAt: Date.now(),
+                        status: 'approved',
+                        decision: 'approved',
+                    },
+                },
+            }));
+            return { decision: 'approved' };
         }
 
         if (this.approveForSessionTools.has(toolName)) {

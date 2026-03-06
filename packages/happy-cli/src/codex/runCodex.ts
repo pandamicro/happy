@@ -22,7 +22,6 @@ import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
-import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { delay } from "@/utils/time";
@@ -38,12 +37,17 @@ import {
     resolveCodexModelCodes,
 } from './modelMetadata';
 import { createEnvelope } from '@slopus/happy-wire';
+import { parseSpecialCommand } from '@/parsers/specialCommands';
 import {
     findCodexResumeFileBySessionId,
     findCodexSessionIdForHappySessionId,
     findLatestCodexResumeFile,
     loadResumeHistoryEntries,
 } from './resume';
+
+const CODEX_CHANGE_TITLE_INSTRUCTION = trimIdent(
+    'Based on this message, call the MCP tool "change_title" with a concise title that summarizes the current task. If the task changes significantly, call "change_title" again.'
+);
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -240,6 +244,12 @@ export async function runCodex(opts: {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
         };
+        const specialCommand = parseSpecialCommand(message.content.text);
+        if (specialCommand.type === 'clear') {
+            logger.debug('[Codex] Detected /clear command');
+            messageQueue.pushIsolateAndClear(message.content.text, enhancedMode);
+            return;
+        }
         messageQueue.push(message.content.text, enhancedMode);
     });
     let thinking = false;
@@ -708,6 +718,35 @@ export async function runCodex(opts: {
 
             // Display user messages in the UI
             messageBuffer.addMessage(message.message, 'user');
+            const specialCommand = parseSpecialCommand(message.message);
+            if (specialCommand.type === 'clear') {
+                logger.debug('[Codex] Handling /clear command locally');
+                client.clearSession();
+                wasCreated = false;
+                first = true;
+                currentTurnId = null;
+                codexStartedSubagents.clear();
+                codexActiveSubagents.clear();
+                codexProviderSubagentToSessionSubagent.clear();
+                requestedResumeFile = null;
+                nextExperimentalResume = null;
+                storedSessionIdForResume = null;
+                permissionHandler.reset();
+                reasoningProcessor.abort();
+                diffProcessor.reset();
+                thinking = false;
+                session.keepAlive(thinking, 'remote');
+                messageBuffer.addMessage('Context was reset', 'status');
+                session.sendSessionEvent({ type: 'message', message: 'Context was reset' });
+                emitReadyIfIdle({
+                    pending,
+                    queueSize: () => messageQueue.size(),
+                    shouldExit,
+                    sendReady,
+                });
+                logActiveHandles('after-clear');
+                continue;
+            }
             currentModeHash = message.hash;
 
             try {
@@ -760,10 +799,10 @@ export async function runCodex(opts: {
                         (startConfig.config as any).experimental_resume = resumeFile;
                     }
 
-                    // Avoid appending title-change instruction on resumed starts to reduce
-                    // unnecessary context overhead right after transcript restoration.
-                    if (first && !resumeFile) {
-                        startConfig.prompt = `${message.message}\n\n${CHANGE_TITLE_INSTRUCTION}`;
+                    // Seed Codex with explicit title-update guidance on the first user turn
+                    // so the session title is updated from the default directory name.
+                    if (first) {
+                        startConfig.prompt = `${message.message}\n\n${CODEX_CHANGE_TITLE_INSTRUCTION}`;
                     }
                     
                     const response = await client.startSession(

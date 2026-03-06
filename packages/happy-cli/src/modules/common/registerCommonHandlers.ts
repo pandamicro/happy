@@ -94,6 +94,9 @@ interface RipgrepResponse {
     exitCode?: number;
     stdout?: string;
     stderr?: string;
+    stdoutTruncated?: boolean;
+    stdoutOriginalBytes?: number;
+    stdoutReturnedBytes?: number;
     error?: string;
 }
 
@@ -108,6 +111,41 @@ interface DifftasticResponse {
     stdout?: string;
     stderr?: string;
     error?: string;
+}
+
+const MAX_RIPGREP_STDOUT_BYTES = 1024 * 1024; // 1 MiB cap to avoid oversized websocket RPC payloads
+
+function truncateUtf8Output(input: string, maxBytes: number): {
+    text: string;
+    truncated: boolean;
+    originalBytes: number;
+    returnedBytes: number;
+} {
+    const inputBuffer = Buffer.from(input, 'utf8');
+    const originalBytes = inputBuffer.length;
+    if (originalBytes <= maxBytes) {
+        return {
+            text: input,
+            truncated: false,
+            originalBytes,
+            returnedBytes: originalBytes,
+        };
+    }
+
+    // Prefer cutting on line boundaries to avoid returning partial file paths.
+    let text = inputBuffer.subarray(0, maxBytes).toString('utf8');
+    const lastNewline = text.lastIndexOf('\n');
+    if (lastNewline > 0) {
+        text = text.slice(0, lastNewline);
+    }
+
+    const returnedBytes = Buffer.byteLength(text, 'utf8');
+    return {
+        text,
+        truncated: true,
+        originalBytes,
+        returnedBytes,
+    };
 }
 
 /*
@@ -476,11 +514,24 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
 
         try {
             const result = await runRipgrep(data.args, { cwd: data.cwd });
+            const stdoutResult = truncateUtf8Output(result.stdout, MAX_RIPGREP_STDOUT_BYTES);
+            if (stdoutResult.truncated) {
+                logger.debug('Ripgrep output truncated to keep RPC payload manageable', {
+                    originalBytes: stdoutResult.originalBytes,
+                    returnedBytes: stdoutResult.returnedBytes,
+                    maxBytes: MAX_RIPGREP_STDOUT_BYTES,
+                    args: data.args,
+                    cwd: data.cwd,
+                });
+            }
             return {
                 success: true,
                 exitCode: result.exitCode,
-                stdout: result.stdout.toString(),
-                stderr: result.stderr.toString()
+                stdout: stdoutResult.text,
+                stderr: result.stderr.toString(),
+                stdoutTruncated: stdoutResult.truncated,
+                stdoutOriginalBytes: stdoutResult.originalBytes,
+                stdoutReturnedBytes: stdoutResult.returnedBytes,
             };
         } catch (error) {
             logger.debug('Failed to run ripgrep:', error);

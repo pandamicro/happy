@@ -100,6 +100,12 @@ class FileSearchCache {
                 return;
             }
 
+            if (response.stdoutTruncated) {
+                console.warn(
+                    `FileSearchCache: ripgrep result truncated (${response.stdoutReturnedBytes}/${response.stdoutOriginalBytes} bytes); suggestions may be partial`
+                );
+            }
+
             // Parse the output into file items
             const filePaths = response.stdout
                 .split('\n')

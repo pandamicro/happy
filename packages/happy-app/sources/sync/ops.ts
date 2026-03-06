@@ -113,6 +113,9 @@ interface SessionRipgrepResponse {
     exitCode?: number;
     stdout?: string;
     stderr?: string;
+    stdoutTruncated?: boolean;
+    stdoutOriginalBytes?: number;
+    stdoutReturnedBytes?: number;
     error?: string;
 }
 

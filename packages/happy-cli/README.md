@@ -51,6 +51,32 @@ Notes:
 - This does not replace or modify your global `happy` command.
 - Re-run `npm --prefix packages/happy-cli run build` after local code changes.
 
+Optional: make `happynow` override global `happy`:
+
+```bash
+# 1) Point global `happy` to current `happynow`
+GLOBAL_BIN="$(dirname "$(command -v happy)")"
+ln -sf "$(command -v happynow)" "$GLOBAL_BIN/happy"
+
+# 2) Refresh shell command cache and verify
+hash -r
+which happy
+happy --help
+```
+
+If you hit permission errors:
+
+```bash
+sudo ln -sf "$(command -v happynow)" "$GLOBAL_BIN/happy"
+```
+
+Rollback to npm global `happy`:
+
+```bash
+npm install -g happy-coder
+hash -r
+```
+
 ## Usage
 
 ### Claude (default)

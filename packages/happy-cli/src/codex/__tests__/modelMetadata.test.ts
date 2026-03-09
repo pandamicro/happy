@@ -15,6 +15,7 @@ describe('modelMetadata', () => {
 
         expect(result[0]).toBe('gpt-5.3-codex');
         expect(result[1]).toBe('my-custom-model');
+        expect(result).toContain('gpt-5.4');
         expect(result).toContain('gpt-5-codex-high');
         expect(result).toContain('gpt-5-high');
     });

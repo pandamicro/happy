@@ -30,6 +30,7 @@ describe('modelModeOptions', () => {
     it('builds codex model fallbacks with translated labels', () => {
         const models = getCodexModelModes(translate);
         expect(models.map((model) => model.key)).toEqual([
+            'gpt-5.4',
             'gpt-5.3-codex',
             'gpt-5-codex-high',
             'gpt-5-codex-medium',

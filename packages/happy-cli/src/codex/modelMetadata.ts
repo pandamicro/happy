@@ -1,6 +1,7 @@
 import type { Metadata } from '@/api/types';
 
 export const CODEX_MODEL_FALLBACK_CODES = [
+    'gpt-5.4',
     'gpt-5.3-codex',
     'gpt-5-codex-high',
     'gpt-5-codex-medium',

@@ -79,6 +79,7 @@ export function getClaudeModelModes(): ModelMode[] {
 
 export function getCodexModelModes(translate: Translate): ModelMode[] {
     return [
+        { key: 'gpt-5.4', name: 'gpt-5.4', description: null },
         { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', description: null },
         { key: 'gpt-5-codex-high', name: translate('agentInput.codexModel.gpt5CodexHigh'), description: null },
         { key: 'gpt-5-codex-medium', name: translate('agentInput.codexModel.gpt5CodexMedium'), description: null },

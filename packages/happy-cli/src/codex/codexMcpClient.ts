@@ -7,17 +7,36 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { logger } from '@/ui/logger';
 import type { CodexSessionConfig, CodexToolResponse } from './types';
 import { z } from 'zod';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import * as z4mini from 'zod/v4-mini';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { execSync } from 'child_process';
 import type { SandboxConfig } from '@/persistence';
 import { initializeSandbox, wrapForMcpTransport } from '@/sandbox/manager';
 import { delay } from '@/utils/time';
 
+/**
+ * Build a passthrough version of ElicitRequestSchema that preserves
+ * Codex-specific params (codex_call_id, codex_command, codex_cwd, etc.).
+ *
+ * The stock MCP SDK schema uses strict object validation (zod/v4-mini `object`)
+ * which strips unknown keys. We rebuild the params union members as
+ * `looseObject` so Codex-specific fields survive parsing in `setRequestHandler`.
+ */
+function buildCodexElicitRequestSchema() {
+    const shape = (ElicitRequestSchema as any)._zod.def.shape;
+    const unionOptions: any[] = shape.params._zod.def.options;
+    const looseOptions = unionOptions.map((opt: any) => z4mini.looseObject(opt._zod.def.shape));
+    // Reuse the original method schema so Client.setRequestHandler can extract the literal.
+    // (The Client override checks `def.value` but z4mini.literal only has `def.values`.)
+    return z4mini.object({
+        method: shape.method,
+        params: z4mini.union(looseOptions as [any, any, ...any[]]),
+    });
+}
+
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
-const CodexElicitRequestSchema = z.object({
-    method: z.literal('elicitation/create'),
-    params: z.record(z.string(), z.unknown()),
-}).passthrough();
+const CodexElicitRequestSchema = buildCodexElicitRequestSchema();
 
 function extractEnumStringsFromSchema(schema: unknown): string[] {
     if (!schema || typeof schema !== 'object') {
@@ -61,17 +80,14 @@ function normalizeCodexDecision(
 ): string {
     const allowedSet = new Set(allowedDecisions);
 
-    // Codex approval endpoints generally expect approved/abort style decisions.
-    // Keep existing behavior equivalent while avoiding unsupported variants.
     let normalized: string = decision;
-    if (normalized === 'approved_for_session') {
-        normalized = 'approved';
-    } else if (normalized === 'denied') {
-        normalized = 'abort';
-    }
 
     if (allowedSet.size > 0 && !allowedSet.has(normalized)) {
-        if (normalized === 'approved' && allowedSet.has('accept')) {
+        if (normalized === 'approved_for_session' && allowedSet.has('approved')) {
+            normalized = 'approved';
+        } else if (normalized === 'denied' && allowedSet.has('abort')) {
+            normalized = 'abort';
+        } else if (normalized === 'approved' && allowedSet.has('accept')) {
             normalized = 'accept';
         } else if (allowedSet.has('approved')) {
             normalized = 'approved';
@@ -104,6 +120,13 @@ function buildElicitationApprovalResponse(
     decision: string,
     decisionField: string,
 ): Record<string, unknown> {
+    let action: 'accept' | 'decline' | 'cancel' = 'accept';
+    if (decision === 'abort' || decision === 'cancel') {
+        action = 'cancel';
+    } else if (decision === 'denied' || decision === 'deny' || decision === 'decline') {
+        action = 'decline';
+    }
+
     const content: Record<string, unknown> = {
         [decisionField]: decision,
     };
@@ -112,7 +135,7 @@ function buildElicitationApprovalResponse(
     // - Standard MCP elicitation consumers read `action` + `content`.
     // - Some Codex builds still read top-level `decision` (and sometimes the decision field itself).
     return {
-        action: decision === 'abort' ? 'decline' : 'accept',
+        action,
         content,
         decision,
         [decisionField]: decision,
@@ -451,10 +474,12 @@ export class CodexMcpClient {
     }
 
     private registerPermissionHandlers(): void {
-        // Register handler for exec command approval requests
+        // CodexElicitRequestSchema is a passthrough version of ElicitRequestSchema
+        // that preserves Codex-specific params (codex_call_id, codex_command, etc.)
+        // which the stock MCP SDK schema would strip.
         this.client.setRequestHandler(
-            CodexElicitRequestSchema,
-            async (request) => {
+            CodexElicitRequestSchema as any,
+            async (request: any) => {
                 const params = request.params && typeof request.params === 'object'
                     ? (request.params as Record<string, unknown>)
                     : {};

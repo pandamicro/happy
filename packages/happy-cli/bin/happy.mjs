@@ -3,6 +3,12 @@
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
+import { ensureUsableCwd } from './ensureUsableCwd.mjs';
+
+const cwdState = ensureUsableCwd();
+if (cwdState.recovered) {
+  console.error(`happy: current working directory was unavailable, using ${cwdState.cwd}`);
+}
 
 // Check if we're already running with the flags
 const hasNoWarnings = process.execArgv.includes('--no-warnings');

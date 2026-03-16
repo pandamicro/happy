@@ -58,6 +58,17 @@ const DEFAULT_COMMANDS: CommandItem[] = [
     { command: 'clear', description: 'Clear the conversation' }
 ];
 
+// Codex sessions do not always publish slashCommands metadata.
+// Keep a conservative fallback set so `/` suggestions remain useful in WebUI.
+const CODEX_FALLBACK_COMMANDS: CommandItem[] = [
+    { command: 'agents', description: 'List available agents and skills' },
+    { command: 'help', description: 'Show available commands' },
+    { command: 'model', description: 'Select the model for this session' },
+    { command: 'permissions', description: 'Change the approval policy' },
+    { command: 'review', description: 'Review workspace changes' },
+    { command: 'status', description: 'Show current session status' }
+];
+
 // Command descriptions for known tools/commands
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
     // Default commands
@@ -73,9 +84,37 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
     stop: 'Stop current operation',
     abort: 'Abort current operation',
     cancel: 'Cancel current operation',
+    agents: 'List available agents and skills',
+    model: 'Select the model for this session',
+    permissions: 'Change the approval policy',
+    review: 'Review workspace changes',
     
     // Add more descriptions as needed
 };
+
+function dedupeCommands(commands: CommandItem[]): CommandItem[] {
+    const deduped: CommandItem[] = [];
+    const seen = new Set<string>();
+    for (const command of commands) {
+        const key = command.command.trim();
+        if (!key || seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        deduped.push({
+            command: key,
+            description: command.description
+        });
+    }
+    return deduped;
+}
+
+function getFlavorFallbackCommands(flavor: string | null | undefined): CommandItem[] {
+    if (flavor === 'codex') {
+        return CODEX_FALLBACK_COMMANDS;
+    }
+    return [];
+}
 
 // Get commands from session metadata
 function getCommandsFromSession(sessionId: string): CommandItem[] {
@@ -85,7 +124,10 @@ function getCommandsFromSession(sessionId: string): CommandItem[] {
         return DEFAULT_COMMANDS;
     }
 
-    const commands: CommandItem[] = [...DEFAULT_COMMANDS];
+    const commands: CommandItem[] = dedupeCommands([
+        ...DEFAULT_COMMANDS,
+        ...getFlavorFallbackCommands(session.metadata.flavor)
+    ]);
     
     // Add commands from metadata.slashCommands (filter with ignore list)
     if (session.metadata.slashCommands) {
@@ -103,7 +145,7 @@ function getCommandsFromSession(sessionId: string): CommandItem[] {
         }
     }
     
-    return commands;
+    return dedupeCommands(commands);
 }
 
 // Main export: search commands with fuzzy matching

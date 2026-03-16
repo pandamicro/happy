@@ -3,6 +3,12 @@
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { join, dirname } from 'path';
+import { ensureUsableCwd } from './ensureUsableCwd.mjs';
+
+const cwdState = ensureUsableCwd();
+if (cwdState.recovered) {
+  console.error(`happy-mcp: current working directory was unavailable, using ${cwdState.cwd}`);
+}
 
 // Ensure Node flags to reduce noisy warnings on stdout (which could interfere with MCP)
 const hasNoWarnings = process.execArgv.includes('--no-warnings');
@@ -29,4 +35,3 @@ if (!hasNoWarnings || !hasNoDeprecation) {
   // Already have desired flags; import module directly
   import('../dist/codex/happyMcpStdioBridge.mjs');
 }
-

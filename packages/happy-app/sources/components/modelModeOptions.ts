@@ -81,6 +81,7 @@ export function getClaudeModelModes(): ModelMode[] {
 
 export function getCodexModelModes(): ModelMode[] {
     return [
+        { key: 'gpt-5-codex-high', name: 'gpt-5-codex-high', description: null },
         { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', description: null },
         { key: 'gpt-5.4', name: 'gpt-5.4', description: null },
         { key: 'gpt-5.2-codex', name: 'gpt-5.2-codex', description: null },
@@ -184,7 +185,7 @@ export function resolveCurrentOption<T extends ModeOption>(
 
 export function getDefaultModelKey(flavor: AgentFlavor): string {
     if (flavor === 'codex') {
-        return 'gpt-5.3-codex';
+        return 'gpt-5-codex-high';
     }
     if (flavor === 'gemini') {
         return 'gemini-2.5-pro';

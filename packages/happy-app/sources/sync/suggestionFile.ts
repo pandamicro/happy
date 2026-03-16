@@ -6,6 +6,8 @@
 import Fuse from 'fuse.js';
 import { sessionRipgrep } from './ops';
 import { AsyncLock } from '@/utils/lock';
+import { storage } from './storage';
+import type { SessionRipgrepResponse } from './ops';
 
 export interface FileItem {
     fileName: string;
@@ -24,11 +26,13 @@ interface SessionCache {
     fuse: Fuse<FileItem> | null;
     lastRefresh: number;
     refreshLock: AsyncLock;
+    cwd?: string;
 }
 
 class FileSearchCache {
     private sessions = new Map<string, SessionCache>();
     private cacheTimeout = 5 * 60 * 1000; // 5 minutes
+    private ripgrepTimeoutMs = 8000;
 
     private getOrCreateSessionCache(sessionId: string): SessionCache {
         let cache = this.sessions.get(sessionId);
@@ -37,11 +41,46 @@ class FileSearchCache {
                 files: [],
                 fuse: null,
                 lastRefresh: 0,
-                refreshLock: new AsyncLock()
+                refreshLock: new AsyncLock(),
+                cwd: undefined
             };
             this.sessions.set(sessionId, cache);
         }
         return cache;
+    }
+
+    private getSessionCwd(sessionId: string): string | undefined {
+        const state = storage.getState();
+        const path = state.sessions[sessionId]?.metadata?.path?.trim();
+        return path && path.length > 0 ? path : undefined;
+    }
+
+    private async ripgrepWithTimeout(
+        sessionId: string,
+        args: string[],
+        cwd: string | undefined
+    ): Promise<SessionRipgrepResponse> {
+        return await new Promise<SessionRipgrepResponse>((resolve) => {
+            const timeout = setTimeout(() => {
+                resolve({
+                    success: false,
+                    error: `ripgrep request timed out after ${this.ripgrepTimeoutMs}ms`
+                });
+            }, this.ripgrepTimeoutMs);
+
+            sessionRipgrep(sessionId, args, cwd)
+                .then((result) => {
+                    clearTimeout(timeout);
+                    resolve(result);
+                })
+                .catch((error) => {
+                    clearTimeout(timeout);
+                    resolve({
+                        success: false,
+                        error: error instanceof Error ? error.message : 'Unknown error'
+                    });
+                });
+        });
     }
 
     private initializeFuse(cache: SessionCache) {
@@ -71,9 +110,14 @@ class FileSearchCache {
     private async ensureCacheValid(sessionId: string): Promise<void> {
         const cache = this.getOrCreateSessionCache(sessionId);
         const now = Date.now();
+        const currentCwd = this.getSessionCwd(sessionId);
         
         // Check if cache needs refresh
-        if (now - cache.lastRefresh <= this.cacheTimeout && cache.files.length > 0) {
+        if (
+            now - cache.lastRefresh <= this.cacheTimeout &&
+            cache.files.length > 0 &&
+            cache.cwd === currentCwd
+        ) {
             return; // Cache is still valid
         }
 
@@ -81,18 +125,28 @@ class FileSearchCache {
         await cache.refreshLock.inLock(async () => {
             // Double-check after acquiring lock
             const currentTime = Date.now();
-            if (currentTime - cache.lastRefresh < 1000) { // Skip if refreshed within last second
+            const lockedCwd = this.getSessionCwd(sessionId);
+            if (currentTime - cache.lastRefresh < 1000 && cache.cwd === lockedCwd) { // Skip if refreshed within last second
                 return;
             }
 
             console.log(`FileSearchCache: Refreshing file cache for session ${sessionId}...`);
 
             // Use ripgrep to get all files in the project
-            const response = await sessionRipgrep(
+            let response = await this.ripgrepWithTimeout(
                 sessionId,
                 ['--files', '--follow'],
-                undefined
+                lockedCwd
             );
+
+            // Fallback to process cwd if explicit session cwd fails.
+            if ((!response.success || !response.stdout) && lockedCwd) {
+                response = await this.ripgrepWithTimeout(
+                    sessionId,
+                    ['--files', '--follow'],
+                    undefined
+                );
+            }
 
             if (!response.success || !response.stdout) {
                 console.error('FileSearchCache: Failed to fetch files', response.error);
@@ -109,7 +163,10 @@ class FileSearchCache {
             // Parse the output into file items
             const filePaths = response.stdout
                 .split('\n')
-                .filter(path => path.trim().length > 0);
+                .map(path => path.trim())
+                .filter(path => path.length > 0)
+                .filter(path => !path.startsWith('Using system ripgrep:'))
+                .filter(path => !path.startsWith('Using packaged ripgrep binary'));
 
             // Clear existing files
             cache.files = [];
@@ -154,6 +211,7 @@ class FileSearchCache {
             });
 
             cache.lastRefresh = Date.now();
+            cache.cwd = lockedCwd;
             this.initializeFuse(cache);
 
             console.log(`FileSearchCache: Cached ${cache.files.length} files and directories for session ${sessionId}`);

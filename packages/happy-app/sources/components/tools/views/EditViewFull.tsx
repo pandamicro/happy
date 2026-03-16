@@ -32,6 +32,7 @@ export const EditViewFull = React.memo<EditViewFullProps>(({ tool, metadata }) =
                 style={{ width: '100%' }}
                 showLineNumbers={true}
                 showPlusMinusSymbols={true}
+                collapsible={false}
             />
         </View>
     );

@@ -44,4 +44,20 @@ describe('resolveMessageModeMeta', () => {
             model: null,
         });
     });
+
+    it('falls back to the active metadata model when local model mode is still default', () => {
+        const meta = resolveMessageModeMeta({
+            permissionMode: 'default',
+            modelMode: 'default',
+            metadata: {
+                sandbox: null,
+                currentModelCode: 'gpt-5.4',
+            },
+        } as any);
+
+        expect(meta).toEqual({
+            permissionMode: 'default',
+            model: 'gpt-5.4',
+        });
+    });
 });

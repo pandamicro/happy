@@ -16,7 +16,8 @@ export function resolveMessageModeMeta(
             : (sandboxEnabled ? 'bypassPermissions' : 'default');
 
     const modelMode = session.modelMode || 'default';
-    const model = modelMode !== 'default' ? modelMode : null;
+    const activeModelCode = session.metadata?.currentModelCode?.trim() || null;
+    const model = modelMode !== 'default' ? modelMode : activeModelCode;
 
     return {
         permissionMode,

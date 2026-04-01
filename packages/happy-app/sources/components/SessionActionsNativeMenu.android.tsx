@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { DropdownMenu, DropdownMenuItem } from '@expo/ui/jetpack-compose';
+import { Button, ContextMenu, type ButtonProps as JetpackButtonProps } from '@expo/ui/jetpack-compose';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
@@ -30,29 +30,19 @@ export function SessionActionsNativeMenu({
         onAfterDelete,
     });
 
+    const items: Array<React.ReactElement<JetpackButtonProps>> = [
+        <Button key="details" onPress={openDetails}>Details</Button>,
+        canArchive ? <Button key="archive" onPress={archiveSession}>Archive</Button> : null,
+        canShowResume ? <Button key="resume" onPress={resumeSession}>Resume</Button> : null,
+        canCopySessionMetadata ? <Button key="copy" onPress={copySessionMetadata}>{t('sessionInfo.copyMetadata')}</Button> : null,
+    ].filter((item): item is React.ReactElement<JetpackButtonProps> => item !== null);
+
     return (
-        <DropdownMenu>
-            <DropdownMenu.Items>
-                <DropdownMenuItem onClick={openDetails}>
-                    <DropdownMenuItem.Text>Details</DropdownMenuItem.Text>
-                </DropdownMenuItem>
-                {canArchive && (
-                    <DropdownMenuItem onClick={archiveSession}>
-                        <DropdownMenuItem.Text>Archive</DropdownMenuItem.Text>
-                    </DropdownMenuItem>
-                )}
-                {canShowResume && (
-                    <DropdownMenuItem onClick={resumeSession}>
-                        <DropdownMenuItem.Text>Resume</DropdownMenuItem.Text>
-                    </DropdownMenuItem>
-                )}
-                {canCopySessionMetadata && (
-                    <DropdownMenuItem onClick={copySessionMetadata}>
-                        <DropdownMenuItem.Text>{t('sessionInfo.copyMetadata')}</DropdownMenuItem.Text>
-                    </DropdownMenuItem>
-                )}
-            </DropdownMenu.Items>
-            <DropdownMenu.Trigger>{children}</DropdownMenu.Trigger>
-        </DropdownMenu>
+        <ContextMenu>
+            <ContextMenu.Items>
+                {items}
+            </ContextMenu.Items>
+            <ContextMenu.Trigger>{children}</ContextMenu.Trigger>
+        </ContextMenu>
     );
 }

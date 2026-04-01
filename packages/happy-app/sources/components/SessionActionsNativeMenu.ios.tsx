@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Button, ContextMenu, Host } from '@expo/ui/swift-ui';
+import { Button, ContextMenu, Host, type ButtonProps as SwiftButtonProps } from '@expo/ui/swift-ui';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
@@ -33,20 +33,18 @@ export function SessionActionsNativeMenu({
         onAfterDelete,
     });
 
+    const items: Array<React.ReactElement<SwiftButtonProps>> = [
+        <Button key="details" onPress={openDetails} systemImage={iosSymbol('info.circle')}>Details</Button>,
+        canArchive ? <Button key="archive" onPress={archiveSession} systemImage={iosSymbol('archivebox')}>Archive</Button> : null,
+        canShowResume ? <Button key="resume" onPress={resumeSession} systemImage={iosSymbol('play.circle')}>Resume</Button> : null,
+        canCopySessionMetadata ? <Button key="copy" onPress={copySessionMetadata} systemImage={iosSymbol('ladybug')}>{t('sessionInfo.copyMetadata')}</Button> : null,
+    ].filter((item): item is React.ReactElement<SwiftButtonProps> => item !== null);
+
     return (
         <Host matchContents>
             <ContextMenu>
                 <ContextMenu.Items>
-                    <Button onPress={openDetails} systemImage={iosSymbol('info.circle')} label="Details" />
-                    {canArchive && (
-                        <Button onPress={archiveSession} systemImage={iosSymbol('archivebox')} label="Archive" />
-                    )}
-                    {canShowResume && (
-                        <Button onPress={resumeSession} systemImage={iosSymbol('play.circle')} label="Resume" />
-                    )}
-                    {canCopySessionMetadata && (
-                        <Button onPress={copySessionMetadata} systemImage={iosSymbol('ladybug')} label={t('sessionInfo.copyMetadata')} />
-                    )}
+                    {items}
                 </ContextMenu.Items>
                 <ContextMenu.Trigger>{children}</ContextMenu.Trigger>
             </ContextMenu>

@@ -140,7 +140,14 @@ export const MachineMetadataSchema = z.object({
     gemini: z.boolean(),
     openclaw: z.boolean(),
     detectedAt: z.number(),
-  }).optional()
+  }).optional(),
+  resumeSupport: z.object({
+    rpcAvailable: z.boolean(),
+    requiresSameMachine: z.boolean(),
+    requiresHappyAgentAuth: z.boolean(),
+    happyAgentAuthenticated: z.boolean(),
+    detectedAt: z.number(),
+  }).optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -260,6 +267,7 @@ export type Metadata = {
   },
   machineId?: string,
   claudeSessionId?: string, // Claude Code session ID
+  codexThreadId?: string, // Codex app-server thread ID
   tools?: string[],
   slashCommands?: string[],
   homeDir: string,

@@ -21,7 +21,7 @@ import { killRunawayHappyProcesses } from './daemon/doctor'
 import { install } from './daemon/install'
 import { uninstall } from './daemon/uninstall'
 import { ApiClient } from './api/api'
-import { runDoctorCommand } from './ui/doctor'
+import { runDoctorCommand, runDoctorDaemon } from './ui/doctor'
 import { listDaemonSessions, stopDaemonSession } from './daemon/controlClient'
 import { handleAuthCommand } from './commands/auth'
 import { handleConnectCommand } from './commands/connect'
@@ -30,6 +30,8 @@ import { spawnHappyCLI } from './utils/spawnHappyCLI'
 import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
 import { extractNoSandboxFlag } from './utils/sandboxFlags'
+import { extractCodexResumeFlag } from '@/codex/cliArgs'
+import { handleResumeCommand } from '@/resume/handleResumeCommand'
 
 
 (async () => {
@@ -97,25 +99,40 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
   } else if (subcommand === 'bye') {
     console.log('Bye!');
     process.exit(0);
+  } else if (subcommand === 'resume') {
+    try {
+      await handleResumeCommand(args.slice(1));
+    } catch (error) {
+      console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
+      if (process.env.DEBUG) {
+        console.error(error)
+      }
+      process.exit(1)
+    }
+    return;
   } else if (subcommand === 'codex') {
     // Handle codex command
     try {
       const { runCodex } = await import('@/codex/runCodex');
-      const { parseCodexArgs } = await import('@/codex/codexArgs');
       
-      const codexArgs = extractNoSandboxFlag(args.slice(1));
-      const parsedCodexArgs = parseCodexArgs(codexArgs.args);
+      // Parse startedBy argument
+      let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      const sandboxArgs = extractNoSandboxFlag(args.slice(1));
+      const codexArgs = extractCodexResumeFlag(sandboxArgs.args);
+      for (let i = 0; i < codexArgs.args.length; i++) {
+        if (codexArgs.args[i] === '--started-by') {
+          startedBy = codexArgs.args[++i] as 'daemon' | 'terminal';
+        }
+      }
       
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
       await runCodex({
         credentials,
-        startedBy: parsedCodexArgs.startedBy,
-        noSandbox: codexArgs.noSandbox,
-        resume: parsedCodexArgs.resumeRequested
-          ? { sessionId: parsedCodexArgs.resumeSessionId }
-          : undefined,
+        startedBy,
+        noSandbox: sandboxArgs.noSandbox,
+        resumeThreadId: codexArgs.resumeThreadId ?? undefined,
       });
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
@@ -543,8 +560,7 @@ import { extractNoSandboxFlag } from './utils/sandboxFlags'
       await stopDaemon()
       process.exit(0)
     } else if (daemonSubcommand === 'status') {
-      // Show daemon-specific doctor output
-      await runDoctorCommand('daemon')
+      await runDoctorDaemon()
       process.exit(0)
     } else if (daemonSubcommand === 'logs') {
       // Simply print the path to the latest daemon log file
@@ -687,6 +703,7 @@ ${chalk.bold('happy')} - Claude Code On the Go
 ${chalk.bold('Usage:')}
   happy [options]         Start Claude with mobile control
   happy auth              Manage authentication
+  happy resume            Resume a previous Happy session by Happy session ID
   happy codex             Start Codex mode
   happy gemini            Start Gemini mode (ACP)
   happy acp               Start a generic ACP-compatible agent
@@ -699,6 +716,7 @@ ${chalk.bold('Usage:')}
 
 ${chalk.bold('Examples:')}
   happy                    Start session
+  happy resume cmmij8      Resume a previous session by Happy session ID
   happy --yolo             Start with bypassing permissions
                             happy sugar for --dangerously-skip-permissions
   happy --chrome           Enable Chrome browser access for this session
@@ -710,7 +728,6 @@ ${chalk.bold('Examples:')}
   happy acp gemini         Start Gemini via generic ACP runner
   happy acp -- opencode --acp
                            Start a custom ACP command
-  happy codex --resume      Resume latest local Codex session
   happy acp opencode --verbose
                            Print raw ACP backend/envelope events
   happy auth login --force Authenticate

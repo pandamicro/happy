@@ -47,6 +47,25 @@ function createMockSession() {
 }
 
 describe('CodexPermissionHandler', () => {
+    it('auto-approves the safe change_title tool', async () => {
+        const mock = createMockSession();
+        const handler = new CodexPermissionHandler(mock.session);
+
+        const result = await handler.handleToolCall(
+            'call_change_title_123',
+            'change_title',
+            { title: 'Greeting' },
+        );
+
+        expect(result).toEqual({ decision: 'approved' });
+        expect(mock.getState().completedRequests?.call_change_title_123).toMatchObject({
+            tool: 'change_title',
+            arguments: { title: 'Greeting' },
+            status: 'approved',
+            decision: 'approved',
+        });
+    });
+
     it('generates a stable fallback id when toolCallId is missing and resolves permission without id', async () => {
         const mock = createMockSession();
         const handler = new CodexPermissionHandler(mock.session);
@@ -105,22 +124,23 @@ describe('CodexPermissionHandler', () => {
         expect(state.completedRequests?.call_second?.decision).toBe('approved_for_session');
     });
 
-    it('does not auto-approve other tool types after approved_for_session', async () => {
+    it('keeps non-safe tools pending for user approval', async () => {
         const mock = createMockSession();
         const handler = new CodexPermissionHandler(mock.session);
 
-        const firstPermission = handler.handleToolCall('call_patch_1', 'CodexPatch', { changes: { a: 1 } });
-        const permissionRpc = mock.getPermissionHandler();
-        expect(permissionRpc).toBeTruthy();
-        await permissionRpc!({ id: 'call_patch_1', approved: true, decision: 'approved_for_session' });
-        await expect(firstPermission).resolves.toEqual({ decision: 'approved_for_session' });
+        const pending = handler.handleToolCall(
+            'call_exec_123',
+            'Bash',
+            { command: 'pwd' },
+        );
 
-        const bashPermissionPromise = handler.handleToolCall('call_bash_1', 'CodexBash', { command: 'ls' });
-        const stateWithPendingBash = mock.getState();
-        expect(stateWithPendingBash.requests?.call_bash_1).toBeDefined();
+        expect(mock.getState().requests?.call_exec_123).toMatchObject({
+            tool: 'Bash',
+            arguments: { command: 'pwd' },
+        });
 
-        await permissionRpc!({ id: 'call_bash_1', approved: false, decision: 'denied' });
-        await expect(bashPermissionPromise).resolves.toEqual({ decision: 'denied' });
-        expect(mock.getState().completedRequests?.call_bash_1?.decision).toBe('denied');
+        handler.abortAll();
+
+        await expect(pending).resolves.toEqual({ decision: 'abort' });
     });
 });

@@ -45,9 +45,9 @@ export function mapMetadataOptions(options?: MetadataOption[] | null): ModeOptio
 export function getClaudePermissionModes(translate: Translate): PermissionMode[] {
     return [
         { key: 'default', name: translate('agentInput.permissionMode.default'), description: null },
-        { key: 'acceptEdits', name: translate('agentInput.permissionMode.acceptEdits'), description: null },
         { key: 'plan', name: translate('agentInput.permissionMode.plan'), description: null },
         { key: 'dontAsk', name: translate('agentInput.permissionMode.dontAsk'), description: null },
+        { key: 'acceptEdits', name: translate('agentInput.permissionMode.acceptEdits'), description: null },
         { key: 'bypassPermissions', name: translate('agentInput.permissionMode.bypassPermissions'), description: null },
     ];
 }
@@ -81,9 +81,9 @@ export function getClaudeModelModes(): ModelMode[] {
 
 export function getCodexModelModes(): ModelMode[] {
     return [
-        { key: 'gpt-5-codex-high', name: 'gpt-5-codex-high', description: null },
-        { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', description: null },
+        { key: 'default', name: 'default model', description: null },
         { key: 'gpt-5.4', name: 'gpt-5.4', description: null },
+        { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', description: null },
         { key: 'gpt-5.2-codex', name: 'gpt-5.2-codex', description: null },
         { key: 'gpt-5.1-codex-max', name: 'gpt-5.1-codex-max', description: null },
         { key: 'gpt-5.2', name: 'gpt-5.2', description: null },
@@ -141,6 +141,9 @@ export function getAvailableModels(
 ): ModelMode[] {
     const metadataModels = mapMetadataOptions(metadata?.models);
     if (metadataModels.length > 0) {
+        if (flavor === 'codex' && !metadataModels.some((model) => model.key === 'default')) {
+            return [{ key: 'default', name: 'default model', description: null }, ...metadataModels];
+        }
         return metadataModels;
     }
     return getHardcodedModelModes(flavor, translate);
@@ -185,7 +188,7 @@ export function resolveCurrentOption<T extends ModeOption>(
 
 export function getDefaultModelKey(flavor: AgentFlavor): string {
     if (flavor === 'codex') {
-        return 'gpt-5-codex-high';
+        return 'default';
     }
     if (flavor === 'gemini') {
         return 'gemini-2.5-pro';

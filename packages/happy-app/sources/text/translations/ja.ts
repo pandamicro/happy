@@ -256,6 +256,7 @@ export const ja: TranslationStructure = {
     newSession: {
         title: '新しいセッションを開始',
         machineOffline: 'マシンがオフラインです',
+        switchMachinesHint: '• 上のマシンをクリックしてマシンを切り替えてください',
     },
 
     sessionHistory: {
@@ -270,6 +271,8 @@ export const ja: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'メッセージを入力...',
+        inactiveArchived: 'このセッションは非アクティブです。',
+        resumeFromTerminal: 'ターミナルから再開するには:',
     },
 
     commandPalette: {
@@ -305,8 +308,11 @@ export const ja: TranslationStructure = {
         happySessionId: 'Happy Session ID',
         claudeCodeSessionId: 'Claude Code Session ID',
         claudeCodeSessionIdCopied: 'Claude Code Session IDがクリップボードにコピーされました',
+        codexThreadId: 'Codex Thread ID',
+        codexThreadIdCopied: 'Codex Thread IDがクリップボードにコピーされました',
         aiProvider: 'AIプロバイダー',
         failedToCopyClaudeCodeSessionId: 'Claude Code Session IDのコピーに失敗しました',
+        failedToCopyCodexThreadId: 'Codex Thread IDのコピーに失敗しました',
         metadataCopied: 'メタデータがクリップボードにコピーされました',
         failedToCopyMetadata: 'メタデータのコピーに失敗しました',
         failedToKillSession: 'セッションの終了に失敗しました',
@@ -318,6 +324,14 @@ export const ja: TranslationStructure = {
         quickActions: 'クイックアクション',
         viewMachine: 'マシンを表示',
         viewMachineSubtitle: 'マシンの詳細とセッションを表示',
+        resumeSession: 'Resume Session',
+        resumeSessionSubtitle: 'Resume this session on the same machine',
+        resumeSessionSameMachineOnly: 'This session can only be resumed on the same machine it started on.',
+        resumeSessionMachineOffline: 'This machine is offline. Resume is only available while it is online.',
+        resumeSessionNeedsHappyAgent: 'Resume is unavailable on this machine. Run `happy-agent auth login` to enable it.',
+        resumeSessionMissingMachine: 'This session is missing its machine metadata, so it cannot be resumed.',
+        resumeSessionMissingBackendId: 'This session does not have a resumable Claude or Codex identifier.',
+        resumeSessionUnexpectedDirectoryPrompt: 'Resume cannot create directories. Start the session manually from its original path.',
         killSessionSubtitle: 'セッションを即座に終了',
         archiveSessionSubtitle: 'このセッションをアーカイブして停止',
         metadata: 'メタデータ',
@@ -337,13 +351,17 @@ export const ja: TranslationStructure = {
         cliVersionOutdated: 'CLIの更新が必要',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `バージョン ${currentVersion} がインストールされています。${requiredVersion} 以降に更新してください`,
-        updateCliInstructions: 'npm install -g happy-coder@latest を実行してください',
+        updateCliInstructions: 'npm install -g happy@latest を実行してください',
         deleteSession: 'セッションを削除',
         deleteSessionSubtitle: 'このセッションを完全に削除',
         deleteSessionConfirm: 'セッションを完全に削除しますか？',
         deleteSessionWarning: 'この操作は取り消せません。このセッションに関連するすべてのメッセージとデータが完全に削除されます。',
         failedToDeleteSession: 'セッションの削除に失敗しました',
         sessionDeleted: 'セッションが正常に削除されました',
+        worktreeCleanupTitle: 'Worktreeを削除しますか？',
+        worktreeCleanupMessage: 'Worktreeにコミットされていない変更はありません。Worktreeのファイルを削除しますか？',
+        worktreeCleanupDelete: 'Worktreeを削除',
+        worktreeCleanupKeep: 'ファイルを保持',
 
     },
 
@@ -524,6 +542,7 @@ export const ja: TranslationStructure = {
         file: 'ファイル',
         fileEmpty: 'ファイルは空です',
         noChanges: '表示する変更はありません',
+        deleted: '削除済み',
     },
 
     settingsVoice: {
@@ -537,7 +556,18 @@ export const ja: TranslationStructure = {
             title: '言語',
             footer: ({ count }: { count: number }) => `${count}言語が利用可能`,
             autoDetect: '自動検出',
-        }
+        },
+        // Bring your own agent
+        byoTitle: '自分のエージェントを使う',
+        byoDescription: 'Happy のデフォルトの代わりに、独自の ElevenLabs エージェントを使用します。サブスクリプション不要 — 自分の ElevenLabs アカウントで直接接続できます。エージェントには2つのクライアントツールを定義する必要があります: messageClaudeCode（コーディングエージェントにテキストを送信）と processPermissionRequest（ツール使用を許可または拒否）。セッションコンテキストは {{initialConversationContext}} 動的変数を通じて受信されます。',
+        customAgentId: 'ElevenLabs Agent ID',
+        customAgentIdNotSet: '未設定',
+        customAgentIdDescription: 'ElevenLabs Agent ID を入力してください。空のままにすると Happy のデフォルトが使用されます。',
+        customAgentIdPlaceholder: 'e.g. abc123def456',
+        bypassToken: '直接接続',
+        bypassTokenSubtitle: 'Happy サーバーをスキップし、ElevenLabs に直接接続',
+        promptGuideTitle: 'エージェントプロンプトガイド',
+        promptGuideDescription: 'ElevenLabs エージェントには以下が必要です:\n\n• ツール: messageClaudeCode — パラメータ: message (string)。アクティブなコーディングセッションにメッセージを送信します。\n• ツール: processPermissionRequest — パラメータ: decision ("allow" または "deny")。保留中のツール許可を承認または拒否します。\n• 動的変数: {{initialConversationContext}} — 開始時にセッション履歴とコンテキストを受信します。\n\nエージェントはユーザーとコーディングエージェント間の音声ブリッジとして機能します。簡潔に、話しかけられた時のみ応答し、コーディングエージェントが作業を完了したら報告する必要があります。',
     },
 
     settingsAccount: {
@@ -690,7 +720,7 @@ export const ja: TranslationStructure = {
     machine: {
         launchNewSessionInDirectory: 'ディレクトリで新しいセッションを起動',
         offlineUnableToSpawn: 'マシンがオフラインのためランチャーは無効です',
-        offlineHelp: '• コンピューターがオンラインであることを確認してください\n• `happy daemon status`を実行して診断してください\n• 最新のCLIバージョンを使用していますか？`npm install -g happy-coder@latest`でアップグレードしてください',
+        offlineHelp: '• コンピューターがオンラインであることを確認してください\n• `happy daemon status`を実行して診断してください\n• 最新のCLIバージョンを使用していますか？`npm install -g happy@latest`でアップグレードしてください',
         daemon: 'デーモン',
         status: 'ステータス',
         stopDaemon: 'デーモンを停止',

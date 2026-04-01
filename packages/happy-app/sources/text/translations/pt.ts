@@ -254,6 +254,7 @@ export const pt: TranslationStructure = {
     newSession: {
         title: 'Iniciar nova sessão',
         machineOffline: 'A máquina está offline',
+        switchMachinesHint: '• Troque de máquina clicando na máquina acima',
     },
 
     sessionHistory: {
@@ -268,6 +269,8 @@ export const pt: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Digite uma mensagem ...',
+        inactiveArchived: 'Esta sessão está inativa.',
+        resumeFromTerminal: 'Para retomá-la pelo terminal:',
     },
 
     commandPalette: {
@@ -303,8 +306,11 @@ export const pt: TranslationStructure = {
         happySessionId: 'ID da sessão Happy',
         claudeCodeSessionId: 'ID da sessão Claude Code',
         claudeCodeSessionIdCopied: 'ID da sessão Claude Code copiado para a área de transferência',
+        codexThreadId: 'ID da thread do Codex',
+        codexThreadIdCopied: 'ID da thread do Codex copiado para a área de transferência',
         aiProvider: 'Provedor de IA',
         failedToCopyClaudeCodeSessionId: 'Falha ao copiar ID da sessão Claude Code',
+        failedToCopyCodexThreadId: 'Falha ao copiar ID da thread do Codex',
         metadataCopied: 'Metadados copiados para a área de transferência',
         failedToCopyMetadata: 'Falha ao copiar metadados',
         failedToKillSession: 'Falha ao encerrar sessão',
@@ -316,6 +322,14 @@ export const pt: TranslationStructure = {
         quickActions: 'Ações rápidas',
         viewMachine: 'Ver máquina',
         viewMachineSubtitle: 'Ver detalhes da máquina e sessões',
+        resumeSession: 'Resume Session',
+        resumeSessionSubtitle: 'Resume this session on the same machine',
+        resumeSessionSameMachineOnly: 'This session can only be resumed on the same machine it started on.',
+        resumeSessionMachineOffline: 'This machine is offline. Resume is only available while it is online.',
+        resumeSessionNeedsHappyAgent: 'Resume is unavailable on this machine. Run `happy-agent auth login` to enable it.',
+        resumeSessionMissingMachine: 'This session is missing its machine metadata, so it cannot be resumed.',
+        resumeSessionMissingBackendId: 'This session does not have a resumable Claude or Codex identifier.',
+        resumeSessionUnexpectedDirectoryPrompt: 'Resume cannot create directories. Start the session manually from its original path.',
         killSessionSubtitle: 'Encerrar imediatamente a sessão',
         archiveSessionSubtitle: 'Arquivar esta sessão e pará-la',
         metadata: 'Metadados',
@@ -335,14 +349,18 @@ export const pt: TranslationStructure = {
         cliVersionOutdated: 'Atualização do CLI necessária',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Versão ${currentVersion} instalada. Atualize para ${requiredVersion} ou posterior`,
-        updateCliInstructions: 'Por favor execute npm install -g happy-coder@latest',
+        updateCliInstructions: 'Por favor execute npm install -g happy@latest',
         deleteSession: 'Excluir sessão',
         deleteSessionSubtitle: 'Remover permanentemente esta sessão',
         deleteSessionConfirm: 'Excluir sessão permanentemente?',
         deleteSessionWarning: 'Esta ação não pode ser desfeita. Todas as mensagens e dados associados a esta sessão serão excluídos permanentemente.',
         failedToDeleteSession: 'Falha ao excluir sessão',
         sessionDeleted: 'Sessão excluída com sucesso',
-        
+        worktreeCleanupTitle: 'Excluir Worktree?',
+        worktreeCleanupMessage: 'O Worktree não tem alterações não confirmadas. Deseja excluir os arquivos do Worktree?',
+        worktreeCleanupDelete: 'Excluir Worktree',
+        worktreeCleanupKeep: 'Manter arquivos',
+
     },
 
     components: {
@@ -522,6 +540,7 @@ export const pt: TranslationStructure = {
         file: 'Arquivo',
         fileEmpty: 'Arquivo está vazio',
         noChanges: 'Nenhuma alteração para exibir',
+        deleted: 'Excluído',
     },
 
     settingsVoice: {
@@ -535,7 +554,18 @@ export const pt: TranslationStructure = {
             title: 'Idiomas',
             footer: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'idioma', plural: 'idiomas' })} disponíveis`,
             autoDetect: 'Detectar automaticamente',
-        }
+        },
+        // Bring your own agent
+        byoTitle: 'Traga seu próprio agente',
+        byoDescription: 'Use seu próprio agente ElevenLabs em vez do padrão do Happy. Nenhuma assinatura necessária — conecte-se diretamente com sua própria conta ElevenLabs. Seu agente deve definir duas ferramentas de cliente: messageClaudeCode (envia texto ao agente de código) e processPermissionRequest (permite ou nega o uso de ferramentas). Recebe o contexto da sessão através da variável dinâmica {{initialConversationContext}}.',
+        customAgentId: 'ElevenLabs Agent ID',
+        customAgentIdNotSet: 'Não configurado',
+        customAgentIdDescription: 'Insira seu ElevenLabs Agent ID. Deixe vazio para usar o padrão do Happy.',
+        customAgentIdPlaceholder: 'e.g. abc123def456',
+        bypassToken: 'Conexão direta',
+        bypassTokenSubtitle: 'Pule o servidor do Happy, conecte-se diretamente ao ElevenLabs',
+        promptGuideTitle: 'Guia de prompt do agente',
+        promptGuideDescription: 'Seu agente ElevenLabs precisa de:\n\n• Ferramenta: messageClaudeCode — parâmetro: message (string). Envia uma mensagem para a sessão de código ativa.\n• Ferramenta: processPermissionRequest — parâmetro: decision ("allow" ou "deny"). Aprova ou nega uma permissão de ferramenta pendente.\n• Variável dinâmica: {{initialConversationContext}} — recebe o histórico e contexto da sessão ao iniciar.\n\nO agente atua como ponte de voz entre o usuário e os agentes de código. Deve ser conciso, responder apenas quando abordado e informar quando um agente de código terminar o trabalho.',
     },
 
     settingsAccount: {
@@ -687,7 +717,7 @@ export const pt: TranslationStructure = {
 
     machine: {
         offlineUnableToSpawn: 'Inicializador desativado enquanto a máquina está offline',
-        offlineHelp: '• Verifique se seu computador está online\n• Execute `happy daemon status` para diagnosticar\n• Você está usando a versão mais recente do CLI? Atualize com `npm install -g happy-coder@latest`',
+        offlineHelp: '• Verifique se seu computador está online\n• Execute `happy daemon status` para diagnosticar\n• Você está usando a versão mais recente do CLI? Atualize com `npm install -g happy@latest`',
         launchNewSessionInDirectory: 'Iniciar nova sessão no diretório',
         daemon: 'Daemon',
         status: 'Status',

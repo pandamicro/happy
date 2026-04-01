@@ -23,6 +23,9 @@ import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { detectCLIAvailability } from '@/utils/detectCLI';
+import { buildResumeLaunch } from '@/resume/handleResumeCommand';
+import { detectResumeSupport } from '@/resume/localHappyAgentAuth';
+import { resolveHappySession } from '@/resume/resolveHappySession';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -33,6 +36,7 @@ export const initialMachineMetadata: MachineMetadata = {
   happyHomeDir: configuration.happyHomeDir,
   happyLibDir: projectPath(),
   cliAvailability: detectCLIAvailability(),
+  resumeSupport: detectResumeSupport(),
 };
 
 export async function startDaemon(): Promise<void> {
@@ -105,6 +109,10 @@ export async function startDaemon(): Promise<void> {
   // Check if running daemon version matches current CLI version
   const runningDaemonVersionMatches = await isDaemonRunningCurrentlyInstalledHappyVersion();
   if (!runningDaemonVersionMatches) {
+    // TODO: This hand-rolled self-restart path is awkward to reason about and awkward to test.
+    // We should probably migrate this daemon to native system service management
+    // (launchd/systemd, similar to OpenClaw's model), so startup/start-at-login and upgrades
+    // are owned by the OS instead of by the daemon trying to replace itself in-process.
     logger.debug('[DAEMON RUN] Daemon version mismatch detected, restarting daemon with current CLI version');
     await stopDaemon();
   } else {
@@ -259,7 +267,10 @@ export async function startDaemon(): Promise<void> {
           }
         }
 
-        let extraEnv = { ...authEnv };
+        let extraEnv = {
+          ...authEnv,
+          ...(options.environmentVariables ?? {}),
+        };
         logger.debug(`[DAEMON RUN] Environment variable keys (before expansion) (${Object.keys(extraEnv).length}): ${Object.keys(extraEnv).join(', ')}`);
 
         // Expand ${VAR} references from daemon's process.env
@@ -268,26 +279,30 @@ export async function startDaemon(): Promise<void> {
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
 
-        // Fail-fast validation: Check that any auth variables present are fully expanded
-        // Only validate variables that are actually set (different agents need different auth)
-        const potentialAuthVars = ['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_HOME', 'AZURE_OPENAI_API_KEY', 'TOGETHER_API_KEY'];
-        const unexpandedAuthVars = potentialAuthVars.filter(varName => {
-          const value = extraEnv[varName];
-          // Only fail if variable IS SET and contains unexpanded ${VAR} references
-          return value && typeof value === 'string' && value.includes('${');
+        // Fail fast if any passed-through environment variable still contains an
+        // unresolved ${VAR} reference after expansion.
+        const unresolvedEnvEntries = Object.entries(extraEnv).flatMap(([key, value]) => {
+          if (typeof value !== 'string' || !value.includes('${')) {
+            return [];
+          }
+
+          const unresolvedMatch = value.match(/\$\{([^}]+)\}/);
+          if (!unresolvedMatch) {
+            return [];
+          }
+
+          const expression = unresolvedMatch[1];
+          const defaultSeparatorIndex = expression.indexOf(':-');
+          const missingVar = defaultSeparatorIndex === -1
+            ? expression
+            : expression.slice(0, defaultSeparatorIndex);
+
+          return [`${key} references \${${missingVar}} which is not defined`];
         });
 
-        if (unexpandedAuthVars.length > 0) {
-          // Extract the specific missing variable names from unexpanded references
-          const missingVarDetails = unexpandedAuthVars.map(authVar => {
-            const value = extraEnv[authVar];
-            const unresolvedMatch = value?.match(/\$\{([A-Z_][A-Z0-9_]*)(:-[^}]*)?\}/);
-            const missingVar = unresolvedMatch ? unresolvedMatch[1] : 'unknown';
-            return `${authVar} references \${${missingVar}} which is not defined`;
-          });
-
-          const errorMessage = `Authentication will fail - environment variables not found in daemon: ${missingVarDetails.join('; ')}. ` +
-            `Ensure these variables are set in the daemon's environment (not just your shell) before starting sessions.`;
+        if (unresolvedEnvEntries.length > 0) {
+          const errorMessage = `Session environment is invalid - environment variables not found in daemon: ${unresolvedEnvEntries.join('; ')}. ` +
+            `Ensure these variables are set in the daemon's environment before starting sessions.`;
           logger.warn(`[DAEMON RUN] ${errorMessage}`);
           return {
             type: 'error',
@@ -435,85 +450,15 @@ export async function startDaemon(): Promise<void> {
 
           // TODO: In future, sessionId could be used with --resume to continue existing sessions
           // For now, we ignore it - each spawn creates a new session
-          const happyProcess = spawnHappyCLI(args, {
+          return spawnTrackedHappyProcess({
+            args,
             cwd: directory,
-            detached: true,  // Sessions stay alive when daemon stops
-            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
             env: {
               ...process.env,
               ...extraEnv
-            }
-          });
-
-          // Log output for debugging
-          if (process.env.DEBUG) {
-            happyProcess.stdout?.on('data', (data) => {
-              logger.debug(`[DAEMON RUN] Child stdout: ${data.toString()}`);
-            });
-            happyProcess.stderr?.on('data', (data) => {
-              logger.debug(`[DAEMON RUN] Child stderr: ${data.toString()}`);
-            });
-          }
-
-          if (!happyProcess.pid) {
-            logger.debug('[DAEMON RUN] Failed to spawn process - no PID returned');
-            return {
-              type: 'error',
-              errorMessage: 'Failed to spawn Happy process - no PID returned'
-            };
-          }
-
-          logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
-
-          const trackedSession: TrackedSession = {
-            startedBy: 'daemon',
-            pid: happyProcess.pid,
-            childProcess: happyProcess,
+            },
             directoryCreated,
-            message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
-          };
-
-          pidToTrackedSession.set(happyProcess.pid, trackedSession);
-
-          happyProcess.on('exit', (code, signal) => {
-            logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
-            if (happyProcess.pid) {
-              onChildExited(happyProcess.pid);
-            }
-          });
-
-          happyProcess.on('error', (error) => {
-            logger.debug(`[DAEMON RUN] Child process error:`, error);
-            if (happyProcess.pid) {
-              onChildExited(happyProcess.pid);
-            }
-          });
-
-          // Wait for webhook to populate session with happySessionId
-          logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
-
-          return new Promise((resolve) => {
-            // Set timeout for webhook
-            const timeout = setTimeout(() => {
-              pidToAwaiter.delete(happyProcess.pid!);
-              logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
-              resolve({
-                type: 'error',
-                errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
-              });
-              // 15 second timeout - I have seen timeouts on 10 seconds
-              // even though session was still created successfully in ~2 more seconds
-            }, 15_000);
-
-            // Register awaiter
-            pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
-              clearTimeout(timeout);
-              logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
-              resolve({
-                type: 'success',
-                sessionId: completedSession.happySessionId!
-              });
-            });
+            message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined,
           });
         }
 
@@ -528,6 +473,108 @@ export async function startDaemon(): Promise<void> {
         return {
           type: 'error',
           errorMessage: `Failed to spawn session: ${errorMessage}`
+        };
+      }
+    };
+
+    const spawnTrackedHappyProcess = ({
+      args,
+      cwd,
+      env,
+      directoryCreated = false,
+      message,
+    }: {
+      args: string[];
+      cwd: string;
+      env: NodeJS.ProcessEnv;
+      directoryCreated?: boolean;
+      message?: string;
+    }): Promise<SpawnSessionResult> => {
+      const happyProcess = spawnHappyCLI(args, {
+        cwd,
+        detached: true,
+        stdio: 'ignore',
+        env,
+      });
+
+      if (!happyProcess.pid) {
+        logger.debug('[DAEMON RUN] Failed to spawn process - no PID returned');
+        return Promise.resolve({
+          type: 'error',
+          errorMessage: 'Failed to spawn Happy process - no PID returned'
+        });
+      }
+
+      logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
+
+      const trackedSession: TrackedSession = {
+        startedBy: 'daemon',
+        pid: happyProcess.pid,
+        childProcess: happyProcess,
+        directoryCreated,
+        message,
+      };
+
+      pidToTrackedSession.set(happyProcess.pid, trackedSession);
+
+      happyProcess.on('exit', (code, signal) => {
+        logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
+        if (happyProcess.pid) {
+          onChildExited(happyProcess.pid);
+        }
+      });
+
+      happyProcess.on('error', (error) => {
+        logger.debug(`[DAEMON RUN] Child process error:`, error);
+        if (happyProcess.pid) {
+          onChildExited(happyProcess.pid);
+        }
+      });
+
+      logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${happyProcess.pid}`);
+
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          pidToAwaiter.delete(happyProcess.pid!);
+          logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${happyProcess.pid}`);
+          resolve({
+            type: 'error',
+            errorMessage: `Session webhook timeout for PID ${happyProcess.pid}`
+          });
+        }, 15_000);
+
+        pidToAwaiter.set(happyProcess.pid!, (completedSession) => {
+          clearTimeout(timeout);
+          logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
+          resolve({
+            type: 'success',
+            sessionId: completedSession.happySessionId!
+          });
+        });
+      });
+    };
+
+    const resumeSession = async (happySessionId: string): Promise<SpawnSessionResult> => {
+      try {
+        const previousSession = await resolveHappySession(happySessionId);
+        const launch = buildResumeLaunch(previousSession, {
+          startedBy: 'daemon',
+          claudeStartingMode: 'remote',
+        });
+
+        await fs.access(launch.cwd);
+
+        return spawnTrackedHappyProcess({
+          args: launch.args,
+          cwd: launch.cwd,
+          env: { ...process.env },
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.debug('[DAEMON RUN] Failed to resume session:', error);
+        return {
+          type: 'error',
+          errorMessage: `Failed to resume session: ${errorMessage}`,
         };
       }
     };
@@ -619,6 +666,7 @@ export async function startDaemon(): Promise<void> {
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       spawnSession,
+      resumeSession,
       stopSession,
       requestShutdown: () => requestShutdown('happy-app')
     });
@@ -660,6 +708,9 @@ export async function startDaemon(): Promise<void> {
       // BIG if - does this get updated from underneath us on npm upgrade?
       const projectVersion = JSON.parse(readFileSync(join(projectPath(), 'package.json'), 'utf-8')).version;
       if (projectVersion !== configuration.currentCliVersion) {
+        // TODO: We probably do not want to keep this in-process self-restart logic long-term.
+        // A native service manager would make startup and upgrades much simpler: the CLI would
+        // ask the OS to start the latest daemon instead of hand-rolling respawn/kill behavior here.
         logger.debug('[DAEMON RUN] Daemon is outdated, triggering self-restart with latest version, clearing heartbeat interval');
 
         clearInterval(restartOnStaleVersionAndHeartbeat);

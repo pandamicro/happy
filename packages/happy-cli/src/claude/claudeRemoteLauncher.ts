@@ -15,8 +15,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
-import { createEnvelope } from "@slopus/happy-wire";
-import { randomUUID } from "node:crypto";
+import { getAskUserQuestionToolCallIds } from "./utils/questionNotification";
 
 interface PermissionsField {
     date: number;
@@ -122,6 +121,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Handle messages
     let planModeToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
+    let notifiedQuestionToolCalls = new Set<string>();
 
     function onMessage(message: SDKMessage) {
 
@@ -156,6 +156,26 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 }
             }
         }
+
+        // Notify once when Claude asks the user a native clarifying question
+        for (const toolCallId of getAskUserQuestionToolCallIds(message)) {
+            if (notifiedQuestionToolCalls.has(toolCallId)) {
+                continue;
+            }
+            notifiedQuestionToolCalls.add(toolCallId);
+            session.api.push().sendSessionNotification({
+                kind: 'question',
+                metadata: session.client.getMetadata(),
+                data: {
+                    sessionId: session.client.sessionId,
+                    tool: 'AskUserQuestion',
+                    toolCallId,
+                    type: 'question_request',
+                    provider: 'claude',
+                }
+            });
+        }
+
         if (message.type === 'user') {
             let umessage = message as SDKUserMessage;
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
@@ -377,16 +397,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onMessage,
                     onCompletionEvent: (message: string) => {
                         logger.debug(`[remote]: Completion event: ${message}`);
-                        if (message === 'Compaction started' || message === 'Compaction completed') {
-                            const text = message === 'Compaction started'
-                                ? 'Compacting session history via /compact...'
-                                : 'Session compaction completed.';
-                            session.client.sendSessionProtocolMessage(createEnvelope(
-                                'agent',
-                                { t: 'service', text },
-                                { turn: randomUUID() },
-                            ));
-                        }
                         session.client.sendSessionEvent({ type: 'message', message });
                     },
                     onSessionReset: () => {
@@ -396,11 +406,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onReady: () => {
                         session.client.closeClaudeSessionTurn('completed');
                         if (!pending && session.queue.size() === 0) {
-                            session.api.push().sendToAllDevices(
-                                'It\'s ready!',
-                                `Claude is waiting for your command`,
-                                { sessionId: session.client.sessionId }
-                            );
+                            session.api.push().sendSessionNotification({
+                                kind: 'done',
+                                metadata: session.client.getMetadata(),
+                                data: {
+                                    sessionId: session.client.sessionId,
+                                    type: 'ready',
+                                    provider: 'claude',
+                                }
+                            });
                         }
                     },
                     signal: abortController.signal,

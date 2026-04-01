@@ -34,6 +34,7 @@ export const MetadataSchema = z.object({
     }).optional(),
     machineId: z.string().optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
+    codexThreadId: z.string().optional(), // Codex app-server thread ID
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine
@@ -42,6 +43,10 @@ export const MetadataSchema = z.object({
     flavor: z.string().nullish(), // Session flavor/variant identifier
     sandbox: z.any().nullish(), // Sandbox config metadata from CLI (or null when disabled)
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
+    lifecycleState: z.string().optional(),
+    lifecycleStateSince: z.number().optional(),
+    archivedBy: z.string().optional(),
+    archiveReason: z.string().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
@@ -68,6 +73,17 @@ export const AgentStateSchema = z.object({
 
 export type AgentState = z.infer<typeof AgentStateSchema>;
 
+export const TodoItemSchema = z.object({
+    content: z.string(),
+    status: z.enum(['pending', 'in_progress', 'completed']),
+    priority: z.enum(['high', 'medium', 'low']).optional(),
+    id: z.string().optional(),
+});
+
+export const TodoItemsSchema = z.array(TodoItemSchema);
+
+export type TodoItem = z.infer<typeof TodoItemSchema>;
+
 export interface Session {
     id: string,
     seq: number,
@@ -82,12 +98,7 @@ export interface Session {
     thinking: boolean,
     thinkingAt: number,
     presence: "online" | number, // "online" when active, timestamp when last seen
-    todos?: Array<{
-        content: string;
-        status: 'pending' | 'in_progress' | 'completed';
-        priority: 'high' | 'medium' | 'low';
-        id: string;
-    }>;
+    todos?: TodoItem[];
     draft?: string | null; // Local draft message, not synced to server
     permissionMode?: string | null; // Local permission mode key, not synced to server
     modelMode?: string | null; // Local model key, not synced to server
@@ -136,6 +147,13 @@ export const MachineMetadataSchema = z.object({
         codex: z.boolean(),
         gemini: z.boolean(),
         openclaw: z.boolean(),
+        detectedAt: z.number(),
+    }).optional(),
+    resumeSupport: z.object({
+        rpcAvailable: z.boolean(),
+        requiresSameMachine: z.boolean(),
+        requiresHappyAgentAuth: z.boolean(),
+        happyAgentAuthenticated: z.boolean(),
         detectedAt: z.number(),
     }).optional(),
 });

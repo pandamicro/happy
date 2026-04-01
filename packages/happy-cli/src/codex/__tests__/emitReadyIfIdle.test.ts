@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { emitReadyIfIdle, getCodexToolErrorMessage } from '../runCodex';
+import { emitReadyIfIdle } from '../runCodex';
 
 describe('emitReadyIfIdle', () => {
     it('emits ready and notification when queue is idle', () => {
@@ -74,35 +74,5 @@ describe('emitReadyIfIdle', () => {
 
         expect(emitted).toBe(false);
         expect(sendReady).not.toHaveBeenCalled();
-    });
-});
-
-describe('getCodexToolErrorMessage', () => {
-    it('extracts text from error tool responses', () => {
-        const message = getCodexToolErrorMessage({
-            isError: true,
-            content: [
-                {
-                    type: 'text',
-                    text: 'unexpected status 503 Service Unavailable',
-                },
-            ],
-        });
-
-        expect(message).toBe('unexpected status 503 Service Unavailable');
-    });
-
-    it('ignores successful tool responses', () => {
-        const message = getCodexToolErrorMessage({
-            isError: false,
-            content: [
-                {
-                    type: 'text',
-                    text: 'ok',
-                },
-            ],
-        });
-
-        expect(message).toBeNull();
     });
 });

@@ -101,6 +101,8 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             minimal = knownTool.minimal;
         }
     }
+
+    const shouldRevealErrorContent = tool.name === 'CodexBash' && tool.state === 'error';
     
     // Special handling for CodexBash to determine icon based on parsed_cmd
     if (tool.name === 'CodexBash' && tool.input?.parsed_cmd && Array.isArray(tool.input.parsed_cmd) && tool.input.parsed_cmd.length > 0) {
@@ -207,7 +209,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             {/* Content area - either custom children or tool-specific view */}
             {(() => {
                 // Check if minimal first - minimal tools don't show content
-                if (minimal) {
+                if (minimal && !shouldRevealErrorContent) {
                     return null;
                 }
 

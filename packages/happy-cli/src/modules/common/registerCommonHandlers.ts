@@ -10,6 +10,16 @@ import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath } from './pathSecurity';
 
 const execAsync = promisify(exec);
+const PERMISSION_FAILURE_PATTERNS = [
+    /operation not permitted/i,
+    /permission denied/i,
+    /\bEACCES\b/,
+    /\bEPERM\b/,
+];
+
+function isPermissionFailure(stderr: string): boolean {
+    return PERMISSION_FAILURE_PATTERNS.some((pattern) => pattern.test(stderr));
+}
 
 interface BashRequest {
     command: string;
@@ -201,10 +211,31 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             const { stdout, stderr } = await execAsync(data.command, options);
             logger.debug('Shell command executed, processing result...');
 
+            const stdoutText = stdout ? stdout.toString() : '';
+            const stderrText = stderr ? stderr.toString() : '';
+
+            if (isPermissionFailure(stderrText)) {
+                const result = {
+                    success: false,
+                    stdout: stdoutText,
+                    stderr: stderrText,
+                    exitCode: 1,
+                    error: stderrText.trim() || 'Command failed',
+                };
+                logger.debug('Shell command reported permission failure:', {
+                    success: false,
+                    exitCode: result.exitCode,
+                    error: result.error,
+                    stdoutLen: result.stdout.length,
+                    stderrLen: result.stderr.length,
+                });
+                return result;
+            }
+
             const result = {
                 success: true,
-                stdout: stdout ? stdout.toString() : '',
-                stderr: stderr ? stderr.toString() : '',
+                stdout: stdoutText,
+                stderr: stderrText,
                 exitCode: 0
             };
             logger.debug('Shell command result:', {

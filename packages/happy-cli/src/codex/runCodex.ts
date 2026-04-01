@@ -30,6 +30,7 @@ import type { ApiSessionClient } from '@/api/apiSession';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
 import { resumeExistingThread } from './resumeExistingThread';
+import { formatCommandExecutionOutput, isCommandExecutionError } from './utils/commandExecutionFeedback';
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -454,12 +455,23 @@ export async function runCodex(opts: {
         } else if (msg.type === 'exec_command_begin') {
             messageBuffer.addMessage(`Executing: ${(msg as any).command}`, 'tool');
         } else if (msg.type === 'exec_command_end') {
-            const output = (msg as any).output || (msg as any).error || 'Command completed';
+            const isError = isCommandExecutionError(msg as any);
+            const output = formatCommandExecutionOutput(msg as any);
             const truncatedOutput = output.substring(0, 200);
             messageBuffer.addMessage(
-                `Result: ${truncatedOutput}${output.length > 200 ? '...' : ''}`,
+                `${isError ? 'Error: ' : 'Result: '}${truncatedOutput}${output.length > 200 ? '...' : ''}`,
                 'result'
             );
+            if (isError) {
+                session.sendAgentMessage('codex', {
+                    type: 'tool-result',
+                    callId: (msg as any).callId,
+                    output,
+                    id: randomUUID(),
+                    isError: true,
+                });
+                return;
+            }
         } else if (msg.type === 'task_started') {
             messageBuffer.addMessage('Starting task...', 'status');
         } else if (msg.type === 'task_complete') {

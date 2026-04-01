@@ -5,10 +5,12 @@ import { Octicons } from '@expo/vector-icons';
 import { ToolCall } from '@/sync/typesMessage';
 import { ToolSectionView } from '../ToolSectionView';
 import { CommandView } from '@/components/CommandView';
+import { ToolError } from '../ToolError';
 import { Metadata } from '@/sync/storageTypes';
 import { resolvePath } from '@/utils/pathUtils';
 import { stringifyToolCommand } from '@/utils/toolCommand';
 import { t } from '@/text';
+import { formatToolError } from './codexBashViewUtils';
 
 interface CodexBashViewProps {
     tool: ToolCall;
@@ -35,6 +37,8 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata })
         commandStr = firstCmd.cmd || null;
     }
 
+    const errorMessage = state === 'error' ? formatToolError(result) : null;
+
     // Get the appropriate icon based on operation type
     let icon: React.ReactNode;
     switch (operationType) {
@@ -46,6 +50,21 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata })
             break;
         default:
             icon = <Octicons name="terminal" size={18} color={theme.colors.textSecondary} />;
+    }
+
+    if (errorMessage) {
+        const commandDisplay = commandStr || stringifyToolCommand(command) || '';
+
+        return (
+            <ToolSectionView>
+                <View style={styles.errorContainer}>
+                    {commandDisplay ? (
+                        <Text style={styles.commandText}>{commandDisplay}</Text>
+                    ) : null}
+                    <ToolError message={errorMessage} />
+                </View>
+            </ToolSectionView>
+        );
     }
 
     // Format the display based on operation type
@@ -100,8 +119,10 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata })
         );
     }
 });
-
 const styles = StyleSheet.create((theme) => ({
+    errorContainer: {
+        gap: 8,
+    },
     readContainer: {
         padding: 12,
         backgroundColor: theme.colors.surfaceHigh,

@@ -209,7 +209,7 @@ describe('CodexMcpClient sandbox integration', () => {
             decision: 'approved',
         });
         await expect(approvalHandler(request)).resolves.toMatchObject({
-            action: 'decline',
+            action: 'cancel',
             content: { decision: 'abort' },
             decision: 'abort',
         });

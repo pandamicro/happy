@@ -44,6 +44,7 @@ import {
     findLatestCodexResumeFile,
     loadResumeHistoryEntries,
 } from './resume';
+import type { CodexToolResponse } from './types';
 
 const CODEX_CHANGE_TITLE_INSTRUCTION = trimIdent(
     'Based on this message, call the MCP tool "change_title" with a concise title that summarizes the current task. If the task changes significantly, call "change_title" again.'
@@ -55,14 +56,18 @@ type ReadyEventOptions = {
     shouldExit: boolean;
     sendReady: () => void;
     notify?: () => void;
+    allowReady?: boolean;
 };
 
 /**
  * Notify connected clients when Codex finishes processing and the queue is idle.
  * Returns true when a ready event was emitted.
  */
-export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, notify }: ReadyEventOptions): boolean {
+export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, notify, allowReady = true }: ReadyEventOptions): boolean {
     if (shouldExit) {
+        return false;
+    }
+    if (!allowReady) {
         return false;
     }
     if (pending) {
@@ -75,6 +80,20 @@ export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, not
     sendReady();
     notify?.();
     return true;
+}
+
+export function getCodexToolErrorMessage(response: CodexToolResponse | null | undefined): string | null {
+    if (!response?.isError) {
+        return null;
+    }
+
+    for (const item of response.content ?? []) {
+        if (item.type === 'text' && typeof item.text === 'string' && item.text.trim().length > 0) {
+            return item.text.trim();
+        }
+    }
+
+    return 'Codex request failed';
 }
 
 /**
@@ -304,6 +323,7 @@ export async function runCodex(opts: {
     let abortController = new AbortController();
     let shouldExit = false;
     let storedSessionIdForResume: string | null = null;
+    let shouldEmitReadyAfterTurn = true;
 
     /**
      * Handles aborting the current task/inference without exiting the process.
@@ -750,6 +770,7 @@ export async function runCodex(opts: {
             currentModeHash = message.hash;
 
             try {
+                shouldEmitReadyAfterTurn = true;
                 // Map permission mode to approval policy and sandbox for startSession
                 const sandboxManagedByHappy = client.sandboxEnabled;
                 const executionPolicy = resolveCodexExecutionPolicy(
@@ -809,6 +830,12 @@ export async function runCodex(opts: {
                         startConfig,
                         { signal: abortController.signal }
                     );
+                    const toolErrorMessage = getCodexToolErrorMessage(response);
+                    if (toolErrorMessage) {
+                        shouldEmitReadyAfterTurn = false;
+                        messageBuffer.addMessage(toolErrorMessage, 'status');
+                        session.sendSessionEvent({ type: 'message', message: toolErrorMessage });
+                    }
                     const modelSignals = extractCodexModelSignalsFromEvent(response);
                     if (modelSignals.currentModel) {
                         observedModelCodes.add(modelSignals.currentModel);
@@ -827,6 +854,12 @@ export async function runCodex(opts: {
                         { signal: abortController.signal }
                     );
                     logger.debug('[Codex] continueSession response:', response);
+                    const toolErrorMessage = getCodexToolErrorMessage(response);
+                    if (toolErrorMessage) {
+                        shouldEmitReadyAfterTurn = false;
+                        messageBuffer.addMessage(toolErrorMessage, 'status');
+                        session.sendSessionEvent({ type: 'message', message: toolErrorMessage });
+                    }
                     const modelSignals = extractCodexModelSignalsFromEvent(response);
                     if (modelSignals.currentModel) {
                         observedModelCodes.add(modelSignals.currentModel);
@@ -869,6 +902,7 @@ export async function runCodex(opts: {
                     queueSize: () => messageQueue.size(),
                     shouldExit,
                     sendReady,
+                    allowReady: shouldEmitReadyAfterTurn,
                 });
                 logActiveHandles('after-turn');
             }

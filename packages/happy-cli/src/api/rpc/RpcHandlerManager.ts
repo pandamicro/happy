@@ -15,6 +15,7 @@ import { Socket } from 'socket.io-client';
 
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map();
+    private cleanupHooks: Array<() => Promise<void> | void> = [];
     private readonly scopePrefix: string;
     private readonly encryptionKey: Uint8Array;
     private readonly encryptionVariant: 'legacy' | 'dataKey';
@@ -128,6 +129,21 @@ export class RpcHandlerManager {
     clearHandlers(): void {
         this.handlers.clear();
         this.logger('Cleared all RPC handlers');
+    }
+
+    registerCleanupHook(hook: () => Promise<void> | void): void {
+        this.cleanupHooks.push(hook);
+    }
+
+    async runCleanupHooks(): Promise<void> {
+        const hooks = [...this.cleanupHooks];
+        for (const hook of hooks) {
+            try {
+                await hook();
+            } catch (error) {
+                this.logger('[RPC] Cleanup hook failed', { error });
+            }
+        }
     }
 
     /**

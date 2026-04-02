@@ -1,6 +1,5 @@
 import { logger } from '@/ui/logger';
-import { exec, ExecOptions } from 'child_process';
-import { promisify } from 'util';
+import { exec, type ChildProcess, type ExecOptions } from 'child_process';
 import { readFile, writeFile, readdir, stat } from 'fs/promises';
 import { createHash } from 'crypto';
 import { join } from 'path';
@@ -8,8 +7,8 @@ import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath } from './pathSecurity';
+import { delay } from '@/utils/time';
 
-const execAsync = promisify(exec);
 const PERMISSION_FAILURE_PATTERNS = [
     /operation not permitted/i,
     /permission denied/i,
@@ -17,8 +16,37 @@ const PERMISSION_FAILURE_PATTERNS = [
     /\bEPERM\b/,
 ];
 
+type TrackedShellCommand = {
+    child: ChildProcess;
+    command: string;
+    terminated: boolean;
+    settled: boolean;
+};
+
 function isPermissionFailure(stderr: string): boolean {
     return PERMISSION_FAILURE_PATTERNS.some((pattern) => pattern.test(stderr));
+}
+
+function killTrackedShellCommand(child: ChildProcess, signal: NodeJS.Signals): void {
+    const pid = child.pid;
+    if (!pid) {
+        return;
+    }
+
+    try {
+        if (process.platform !== 'win32') {
+            process.kill(-pid, signal);
+            return;
+        }
+    } catch {
+        // Fall through to best-effort child kill below.
+    }
+
+    try {
+        child.kill(signal);
+    } catch {
+        // Ignore best-effort termination failures.
+    }
 }
 
 interface BashRequest {
@@ -182,6 +210,65 @@ export type SpawnSessionResult =
  * Register all RPC handlers with the session
  */
 export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string) {
+    const activeShellCommands = new Set<TrackedShellCommand>();
+
+    const trackShellCommand = (child: ChildProcess, command: string): TrackedShellCommand => {
+        const tracked: TrackedShellCommand = {
+            child,
+            command,
+            terminated: false,
+            settled: false,
+        };
+
+        activeShellCommands.add(tracked);
+        child.once('exit', () => {
+            tracked.settled = true;
+            activeShellCommands.delete(tracked);
+        });
+        child.once('close', () => {
+            tracked.settled = true;
+            activeShellCommands.delete(tracked);
+        });
+        child.once('error', () => {
+            tracked.settled = true;
+            activeShellCommands.delete(tracked);
+        });
+
+        return tracked;
+    };
+
+    const terminateTrackedShellCommands = async (): Promise<void> => {
+        const activeCommands = [...activeShellCommands];
+        if (activeCommands.length === 0) {
+            return;
+        }
+
+        logger.debug('Terminating active shell commands', {
+            count: activeCommands.length,
+            commands: activeCommands.map((entry) => entry.command),
+        });
+
+        for (const entry of activeCommands) {
+            if (entry.terminated) {
+                continue;
+            }
+            entry.terminated = true;
+            killTrackedShellCommand(entry.child, 'SIGTERM');
+        }
+
+        await delay(250);
+
+        for (const entry of activeCommands) {
+            if (entry.settled) {
+                continue;
+            }
+            killTrackedShellCommand(entry.child, 'SIGKILL');
+        }
+
+        await delay(100);
+    };
+
+    rpcHandlerManager.registerCleanupHook(terminateTrackedShellCommands);
 
     // Shell command handler - executes commands in the default shell
     rpcHandlerManager.registerHandler<BashRequest, BashResponse>('bash', async (data) => {
@@ -202,47 +289,107 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             // Build options with shell enabled by default
             // Note: ExecOptions doesn't support boolean for shell, but exec() uses the default shell when shell is undefined
             // If cwd is "/", use undefined to let shell use its default (respects user's PATH)
-            const options: ExecOptions = {
+            const options: ExecOptions & { detached?: boolean } = {
                 cwd: data.cwd === '/' ? undefined : data.cwd,
                 timeout: data.timeout || 30000, // Default 30 seconds timeout
+                detached: process.platform !== 'win32',
             };
 
             logger.debug('Shell command executing...', { cwd: options.cwd, timeout: options.timeout });
-            const { stdout, stderr } = await execAsync(data.command, options);
-            logger.debug('Shell command executed, processing result...');
+            const result = await new Promise<BashResponse>((resolve) => {
+                const child = exec(data.command, options, (error, stdout, stderr) => {
+                    tracked.settled = true;
+                    activeShellCommands.delete(tracked);
 
-            const stdoutText = stdout ? stdout.toString() : '';
-            const stderrText = stderr ? stderr.toString() : '';
+                    const stdoutText = stdout ? stdout.toString() : '';
+                    const stderrText = stderr ? stderr.toString() : '';
 
-            if (isPermissionFailure(stderrText)) {
-                const result = {
-                    success: false,
-                    stdout: stdoutText,
-                    stderr: stderrText,
-                    exitCode: 1,
-                    error: stderrText.trim() || 'Command failed',
-                };
-                logger.debug('Shell command reported permission failure:', {
-                    success: false,
-                    exitCode: result.exitCode,
-                    error: result.error,
-                    stdoutLen: result.stdout.length,
-                    stderrLen: result.stderr.length,
+                    if (error) {
+                        const execError = error as NodeJS.ErrnoException & {
+                            stdout?: string;
+                            stderr?: string;
+                            code?: number | string;
+                            killed?: boolean;
+                        };
+
+                        const combinedStderr = stderrText || execError.stderr?.toString?.() || execError.message || '';
+                        const combinedStdout = stdoutText || execError.stdout?.toString?.() || '';
+
+                        if (isPermissionFailure(combinedStderr)) {
+                            const permissionFailureResult = {
+                                success: false,
+                                stdout: combinedStdout,
+                                stderr: combinedStderr,
+                                exitCode: 1,
+                                error: combinedStderr.trim() || 'Command failed',
+                            };
+                            logger.debug('Shell command reported permission failure:', {
+                                success: false,
+                                exitCode: permissionFailureResult.exitCode,
+                                error: permissionFailureResult.error,
+                                stdoutLen: permissionFailureResult.stdout?.length ?? 0,
+                                stderrLen: permissionFailureResult.stderr?.length ?? 0,
+                            });
+                            resolve(permissionFailureResult);
+                            return;
+                        }
+
+                        if (execError.code === 'ETIMEDOUT' || execError.killed) {
+                            const timedOutResult = {
+                                success: false,
+                                stdout: combinedStdout,
+                                stderr: combinedStderr,
+                                exitCode: typeof execError.code === 'number' ? execError.code : -1,
+                                error: 'Command timed out',
+                            };
+                            logger.debug('Shell command timed out:', {
+                                success: false,
+                                exitCode: timedOutResult.exitCode,
+                                error: timedOutResult.error,
+                            });
+                            resolve(timedOutResult);
+                            return;
+                        }
+
+                        const failedResult = {
+                            success: false,
+                            stdout: combinedStdout,
+                            stderr: combinedStderr || execError.message || 'Command failed',
+                            exitCode: typeof execError.code === 'number' ? execError.code : 1,
+                            error: execError.message || 'Command failed',
+                        };
+                        logger.debug('Shell command failed:', {
+                            success: false,
+                            exitCode: failedResult.exitCode,
+                            error: failedResult.error,
+                            stdoutLen: failedResult.stdout.length,
+                            stderrLen: failedResult.stderr.length,
+                        });
+                        resolve(failedResult);
+                        return;
+                    }
+
+                    logger.debug('Shell command executed, processing result...');
+
+                    const successfulResult = {
+                        success: true,
+                        stdout: stdoutText,
+                        stderr: stderrText,
+                        exitCode: 0,
+                    };
+                    logger.debug('Shell command result:', {
+                        success: true,
+                        exitCode: 0,
+                        stdoutLen: successfulResult.stdout?.length ?? 0,
+                        stderrLen: successfulResult.stderr?.length ?? 0,
+                    });
+                    resolve(successfulResult);
                 });
-                return result;
-            }
 
-            const result = {
-                success: true,
-                stdout: stdoutText,
-                stderr: stderrText,
-                exitCode: 0
-            };
-            logger.debug('Shell command result:', {
-                success: true,
-                exitCode: 0,
-                stdoutLen: result.stdout.length,
-                stderrLen: result.stderr.length
+                const tracked = trackShellCommand(child, data.command);
+                if (tracked.child.pid) {
+                    logger.debug('Shell command tracked', { pid: tracked.child.pid, command: data.command });
+                }
             });
             return result;
         } catch (error) {
@@ -252,25 +399,6 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
                 code?: number | string;
                 killed?: boolean;
             };
-
-            // Check if the error was due to timeout
-            if (execError.code === 'ETIMEDOUT' || execError.killed) {
-                const result = {
-                    success: false,
-                    stdout: execError.stdout || '',
-                    stderr: execError.stderr || '',
-                    exitCode: typeof execError.code === 'number' ? execError.code : -1,
-                    error: 'Command timed out'
-                };
-                logger.debug('Shell command timed out:', {
-                    success: false,
-                    exitCode: result.exitCode,
-                    error: 'Command timed out'
-                });
-                return result;
-            }
-
-            // If exec fails, it includes stdout/stderr in the error
             const result = {
                 success: false,
                 stdout: execError.stdout ? execError.stdout.toString() : '',

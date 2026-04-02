@@ -389,6 +389,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         logger.debug('[START] Received termination signal, cleaning up...');
 
         try {
+            await session.rpcHandlerManager.runCleanupHooks();
+
             // Update lifecycle state to archived before closing
             if (session) {
                 session.updateMetadata((currentMetadata) => ({

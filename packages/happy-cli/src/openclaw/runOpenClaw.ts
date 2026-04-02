@@ -299,6 +299,7 @@ export async function runOpenClaw(opts: RunOpenClawOptions): Promise<void> {
     messageQueue.close();
     clearPendingTurn(new Error('Session terminated'));
     await handleAbort();
+    await session.rpcHandlerManager.runCleanupHooks();
   });
 
   try {

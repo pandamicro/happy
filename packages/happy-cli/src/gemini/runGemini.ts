@@ -376,6 +376,8 @@ export async function runGemini(opts: {
     logger.debug('[Gemini] Abort completed, proceeding with termination');
 
     try {
+      await session.rpcHandlerManager.runCleanupHooks();
+
       if (session) {
         session.updateMetadata((currentMetadata) => ({
           ...currentMetadata,

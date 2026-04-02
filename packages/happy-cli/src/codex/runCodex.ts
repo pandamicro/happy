@@ -323,6 +323,8 @@ export async function runCodex(opts: {
         logger.debug('[Codex] Abort completed, proceeding with termination');
 
         try {
+            await session.rpcHandlerManager.runCleanupHooks();
+
             // Update lifecycle state to archived before closing
             if (session) {
                 session.updateMetadata((currentMetadata) => ({

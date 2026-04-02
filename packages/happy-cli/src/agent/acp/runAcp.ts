@@ -865,6 +865,7 @@ export async function runAcp(opts: {
     messageQueue.close();
     clearPendingTurn(new Error('Session terminated'));
     await handleAbort();
+    await session.rpcHandlerManager.runCleanupHooks();
   });
 
   try {
